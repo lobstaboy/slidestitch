@@ -1,0 +1,2207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SlideStitch</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="description" content="Whole-slide microscopy imaging from a phone camera: sweep the slide, SlideStitch stitches it live and keeps the raw video for archival re-stitching.">
+<meta name="theme-color" content="#141218">
+<meta name="color-scheme" content="dark">
+<!-- Installable web app (iPhone: Share → Add to Home Screen) -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SlideStitch">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+</head>
+<body>
+<style>
+  /* SlideStitch — dark instrument UI. Single deliberate theme (viewfinder app). */
+  :root{
+    --ground:#141218; --surface:#1e1b24; --raised:#282430; --line:#39343f; --line-soft:#2c2833;
+    --text:#ece9f1; --muted:#9c95a8; --faint:#6f6879;
+    --accent:#9c8be0;          /* hematoxylin violet */
+    --accent-deep:#7a68c4;
+    --live:#e05a80;            /* eosin pink — record/live */
+    --ok:#5fbf8a; --warn:#d9a441; --crit:#e0566b;
+    --sans:'Instrument Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
+    --safe-b:env(safe-area-inset-bottom,0px);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--ground);color:var(--text);font-family:var(--sans);font-size:15px;
+       line-height:1.45;overflow:hidden;-webkit-font-smoothing:antialiased;touch-action:manipulation}
+  button{font-family:var(--sans);color:var(--text);background:none;border:none;cursor:pointer}
+  button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{
+    outline:2px solid var(--accent);outline-offset:2px}
+  input,textarea,select{font-family:var(--sans);font-size:15px;color:var(--text);
+    background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:9px 11px;width:100%}
+  textarea{resize:vertical;min-height:64px}
+  label{display:block;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--muted);margin:14px 0 5px}
+  .mono{font-family:var(--mono)}
+
+  /* ---------- app shell ---------- */
+  #app{height:100%;display:flex;flex-direction:column}
+  .view{flex:1;min-height:0;display:none;flex-direction:column}
+  .view.active{display:flex}
+  #tabbar{display:flex;border-top:1px solid var(--line-soft);background:var(--surface);
+    padding-bottom:var(--safe-b)}
+  #tabbar button{flex:1;padding:10px 0 12px;font-size:12px;font-weight:600;letter-spacing:.05em;
+    color:var(--faint);display:flex;flex-direction:column;align-items:center;gap:3px}
+  #tabbar button.on{color:var(--accent)}
+  #tabbar svg{width:22px;height:22px}
+
+  /* ---------- capture view ---------- */
+  #capture{position:relative;background:#000}
+  #stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  #video{max-width:100%;max-height:100%;object-fit:contain}
+  #camMsg{position:absolute;inset:0;display:flex;flex-direction:column;gap:14px;align-items:center;
+    justify-content:center;text-align:center;padding:32px;background:var(--ground)}
+  #camMsg p{color:var(--muted);max-width:34ch}
+  #camMsg h2{font-size:19px}
+  .btn{display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#17131f;
+    font-weight:600;padding:11px 20px;border-radius:10px;font-size:15px}
+  .btn.ghost{background:var(--raised);color:var(--text);border:1px solid var(--line)}
+  .btn.danger{background:var(--crit);color:#1b0e12}
+  .btn:disabled{opacity:.45;cursor:default}
+
+  /* Tracking state ring: green = locked, amber = unsure, red = lost */
+  #trackRing{position:absolute;inset:0;pointer-events:none;z-index:4;
+    border:4px solid transparent;transition:border-color .15s}
+  #trackRing.ok{border-color:rgba(95,191,138,.75)}
+  #trackRing.warn{border-color:rgba(217,164,65,.85)}
+  #trackRing.crit{border-color:rgba(224,86,107,.95);animation:ringpulse 0.7s infinite}
+  @keyframes ringpulse{50%{border-color:rgba(224,86,107,.35)}}
+  @media (prefers-reduced-motion:reduce){#trackRing.crit{animation:none}}
+
+  /* HUD */
+  #hud{position:absolute;top:0;left:0;right:0;padding:12px 14px;display:flex;align-items:flex-start;
+    justify-content:space-between;gap:10px;pointer-events:none;z-index:5}
+  .hudcol{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+  .hudcol.right{align-items:flex-end}
+  .pill{pointer-events:auto;display:inline-flex;align-items:center;gap:7px;background:rgba(20,18,24,.78);
+    backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:999px;padding:5px 12px;
+    font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .pill .dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}
+  #statusPill.ok .dot{background:var(--ok)} #statusPill.ok{color:var(--ok)}
+  #statusPill.warn .dot{background:var(--warn)} #statusPill.warn{color:var(--warn)}
+  #statusPill.crit .dot{background:var(--crit)} #statusPill.crit{color:var(--crit)}
+  #statusPill.live .dot{background:var(--live);animation:blink 1.1s infinite}
+  @keyframes blink{50%{opacity:.25}}
+  @media (prefers-reduced-motion:reduce){#statusPill.live .dot{animation:none}}
+  #minimapWrap{pointer-events:none;position:absolute;right:12px;bottom:118px;border:1px solid var(--line);
+    border-radius:10px;overflow:hidden;background:rgba(20,18,24,.82);display:none}
+  #minimap{display:block}
+
+  /* capture controls */
+  #controls{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;
+    justify-content:center;gap:26px;padding:16px 20px calc(16px + var(--safe-b));
+    background:linear-gradient(transparent,rgba(10,9,13,.82))}
+  .roundbtn{width:46px;height:46px;border-radius:50%;background:rgba(40,36,48,.88);
+    border:1px solid var(--line);display:flex;align-items:center;justify-content:center}
+  .roundbtn svg{width:21px;height:21px;stroke:var(--text)}
+  #recBtn{width:74px;height:74px;border-radius:50%;border:3px solid #fff;background:transparent;
+    display:flex;align-items:center;justify-content:center;transition:transform .1s}
+  #recBtn:active{transform:scale(.94)}
+  #recBtn .core{width:58px;height:58px;border-radius:50%;background:var(--live);transition:border-radius .18s,width .18s,height .18s}
+  #recBtn.rec .core{width:30px;height:30px;border-radius:7px}
+
+  /* ---------- sheets / modals ---------- */
+  .sheet{position:fixed;inset:0;background:rgba(8,7,11,.66);display:none;z-index:40;
+    align-items:flex-end;justify-content:center}
+  .sheet.open{display:flex}
+  .sheet .panel{background:var(--surface);border:1px solid var(--line);border-bottom:none;
+    border-radius:16px 16px 0 0;width:100%;max-width:560px;max-height:88vh;overflow-y:auto;
+    padding:20px 20px calc(24px + var(--safe-b))}
+  .panel h2{font-size:17px;margin-bottom:2px}
+  .panel .sub{color:var(--muted);font-size:13px}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .sheet .actions{display:flex;gap:10px;margin-top:20px}
+  .sheet .actions .btn{flex:1;justify-content:center}
+  #savePreviewWrap{margin-top:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+    background:#0d0c10;max-height:200px;display:flex;align-items:center;justify-content:center}
+  #savePreview{max-width:100%;max-height:200px;display:block}
+  .metaline{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:8px}
+
+  /* ---------- library ---------- */
+  #library{background:var(--ground)}
+  #libHead{padding:16px 16px 10px;display:flex;flex-direction:column;gap:12px;border-bottom:1px solid var(--line-soft)}
+  #libHead .toprow{display:flex;align-items:baseline;justify-content:space-between}
+  #libHead h1{font-size:20px;letter-spacing:-.01em}
+  #storageNote{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  #libScroll{flex:1;overflow-y:auto;padding:14px 16px calc(16px + var(--safe-b))}
+  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  .card{background:var(--surface);border:1px solid var(--line-soft);border-radius:12px;overflow:hidden;
+    text-align:left;display:flex;flex-direction:column;transition:border-color .15s}
+  .card:hover{border-color:var(--accent-deep)}
+  .card .thumb{aspect-ratio:4/3;background:#0d0c10;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .card .thumb img{width:100%;height:100%;object-fit:cover}
+  .card .info{padding:9px 11px 11px;display:flex;flex-direction:column;gap:3px;min-width:0}
+  .card .name{display:block;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .card .meta{display:block;font-family:var(--mono);font-size:11px;color:var(--faint)}
+  #emptyLib{text-align:center;color:var(--muted);padding:60px 20px;display:none}
+  #emptyLib .scopeicon{font-size:40px;margin-bottom:10px}
+
+  /* ---------- slide detail viewer ---------- */
+  #detail{position:fixed;inset:0;background:var(--ground);z-index:30;display:none;flex-direction:column}
+  #detail.open{display:flex}
+  #detailBar{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line-soft);
+    background:var(--surface)}
+  #detailBar .name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .iconbtn{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+    border:1px solid var(--line);background:var(--raised)}
+  .iconbtn svg{width:18px;height:18px;stroke:var(--text)}
+  #viewerWrap{flex:1;position:relative;overflow:hidden;background:#0d0c10;touch-action:none;cursor:grab}
+  #viewerWrap:active{cursor:grabbing}
+  #viewerCanvas{position:absolute;top:0;left:0}
+  #scalebar{position:absolute;left:14px;bottom:14px;background:rgba(20,18,24,.8);border:1px solid var(--line);
+    border-radius:8px;padding:6px 10px;font-family:var(--mono);font-size:11px;color:var(--text);display:none}
+  #scalebar .bar{height:3px;background:var(--text);margin-top:4px;border-radius:2px}
+  #zoomHint{position:absolute;right:14px;bottom:14px;font-family:var(--mono);font-size:11px;
+    color:var(--faint);background:rgba(20,18,24,.8);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+  #detailMeta{border-top:1px solid var(--line-soft);background:var(--surface);padding:12px 16px calc(14px + var(--safe-b));
+    max-height:38vh;overflow-y:auto}
+  #detailMeta .mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-top:8px}
+  .mitem .k{font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--faint)}
+  .mitem .v{font-family:var(--mono);font-size:13px;margin-top:2px}
+  #detailNotes{color:var(--muted);font-size:13px;margin-top:10px;white-space:pre-wrap}
+
+  #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(76px + var(--safe-b));
+    background:var(--raised);border:1px solid var(--line);color:var(--text);padding:9px 16px;
+    border-radius:10px;font-size:13px;z-index:60;opacity:0;pointer-events:none;transition:opacity .2s}
+  #toast.show{opacity:1}
+  .hidden{display:none!important}
+</style>
+
+<div id="app">
+
+  <!-- ============ CAPTURE ============ -->
+  <section id="capture" class="view active">
+    <div id="stage"><video id="video" autoplay playsinline muted></video></div>
+
+    <div id="camMsg">
+      <div style="font-size:40px">🔬</div>
+      <h2>SlideStitch</h2>
+      <p>Point a camera at the microscope eyepiece or use a mounted scope camera, then sweep the slide — SlideStitch builds the whole-slide image live.</p>
+      <button class="btn" id="enableCamBtn">Enable camera</button>
+      <button class="btn ghost" id="openVideoBtn2">Stitch a video file instead</button>
+      <p id="camErr" class="mono" style="font-size:12px;color:var(--crit);max-width:36ch"></p>
+      <div id="safariHint" class="hidden" style="display:flex;flex-direction:column;gap:10px;align-items:center">
+        <p style="color:var(--warn);font-size:13px;max-width:36ch">This in-app viewer is blocking the camera. Open SlideStitch in Safari instead — the camera works there.</p>
+        <button class="btn ghost" id="copyLinkBtn">Copy link for Safari</button>
+        <p id="copyLinkOut" class="mono" style="font-size:11px;color:var(--muted);word-break:break-all;max-width:38ch;user-select:all;-webkit-user-select:all"></p>
+      </div>
+    </div>
+
+    <div id="trackRing"></div>
+    <div id="hud">
+      <div class="hudcol">
+        <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">ready</span></span>
+        <span class="pill" id="dimPill" style="display:none"><span id="dimText"></span></span>
+        <span class="pill" id="zoomPill" style="display:none;gap:9px">
+          <span id="zoomText">1.0×</span>
+          <input type="range" id="zoomSlider" min="1" max="1" step="0.1" value="1"
+                 aria-label="Camera zoom" style="width:110px;padding:0;background:none;border:none;accent-color:var(--accent)">
+        </span>
+      </div>
+      <div class="hudcol right">
+        <button class="pill" id="objPill" style="cursor:pointer;font:inherit">objective —</button>
+        <span class="pill" id="mppPill">-- µm/px</span>
+        <span class="pill" id="confPill" style="display:none">conf --</span>
+      </div>
+    </div>
+
+    <div id="minimapWrap"><canvas id="minimap" width="150" height="150"></canvas></div>
+
+    <div id="controls">
+      <button class="roundbtn" id="flipBtn" title="Switch camera" aria-label="Switch camera">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 9h11l-3-3m8 9H9l3 3"/></svg>
+      </button>
+      <button id="recBtn" aria-label="Start or finish stitching"><span class="core"></span></button>
+      <button class="roundbtn" id="settingsBtn" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.06-.4.1-.8.1-1.2Z"/></svg>
+      </button>
+    </div>
+    <input type="file" id="videoFileInput" accept="video/*" class="hidden">
+  </section>
+
+  <!-- ============ LIBRARY ============ -->
+  <section id="library" class="view">
+    <div id="libHead">
+      <div class="toprow"><h1>Slides</h1><span id="storageNote"></span></div>
+      <input type="search" id="searchInput" placeholder="Search by name, notes, stain…" aria-label="Search slides">
+    </div>
+    <div id="libScroll">
+      <div id="grid"></div>
+      <div id="emptyLib">
+        <div class="scopeicon">🧫</div>
+        <p>No slides yet.<br>Capture your first whole-slide image from the Capture tab.</p>
+      </div>
+    </div>
+  </section>
+
+  <nav id="tabbar">
+    <button id="tabCapture" class="on" aria-label="Capture tab">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none"/></svg>
+      Capture
+    </button>
+    <button id="tabLibrary" aria-label="Slides tab">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>
+      Slides
+    </button>
+  </nav>
+</div>
+
+<!-- ============ SAVE SHEET ============ -->
+<div class="sheet" id="saveSheet" role="dialog" aria-label="Save slide">
+  <div class="panel">
+    <h2>Save slide</h2>
+    <div class="sub">Stitching complete — review and file it in your library.</div>
+    <div id="savePreviewWrap"><img id="savePreview" alt="Stitched slide preview"></div>
+    <div class="metaline" id="saveMeta"></div>
+    <label for="saveName">Slide name</label>
+    <input id="saveName" autocomplete="off">
+    <label>Objective</label>
+    <div id="saveObjGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px"></div>
+    <div class="row2">
+      <div><label for="saveMpp">Microns / pixel</label><input id="saveMpp" type="number" step="0.0001" min="0"></div>
+      <div><label for="saveMag">Magnification</label><input id="saveMag" placeholder="e.g. 10x"></div>
+    </div>
+    <p class="sub" id="saveScaleNote" style="margin:-2px 0 4px"></p>
+    <label for="saveStain">Stain</label>
+    <input id="saveStain" placeholder="e.g. H&E, Giemsa, Gram">
+    <label for="saveNotes">Notes</label>
+    <textarea id="saveNotes" placeholder="Specimen, observations…"></textarea>
+    <div class="actions">
+      <button class="btn ghost" id="discardBtn">Discard</button>
+      <button class="btn" id="saveBtn">Save to library</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ OBJECTIVE SHEET ============ -->
+<div class="sheet" id="objSheet" role="dialog" aria-label="Choose objective">
+  <div class="panel">
+    <h2>Which objective?</h2>
+    <div class="sub" id="objSub">Pick the objective on the nosepiece. This sets the scale of the
+      finished slide — you can correct it afterwards if you pick the wrong one.</div>
+    <div id="objGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0"></div>
+    <p class="sub" id="objCalc" style="margin-top:8px"></p>
+    <div class="actions">
+      <button class="btn ghost" id="objCancel">Cancel</button>
+      <button class="btn" id="objDone">Use this</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ SCALE CALIBRATION SHEET ============ -->
+<div class="sheet" id="calSheet" role="dialog" aria-label="Calibrate scale">
+  <div class="panel">
+    <h2>Calibrate scale</h2>
+    <div class="sub">Put a stage micrometer under the objective and focus on the rulings.
+      Freeze the view, drag a line between two marks you can identify, and say how far apart
+      they are. That measurement is the only thing that sets µm/pixel.</div>
+    <div style="margin:12px 0 6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="sub" style="margin:0">Objective being calibrated:</span>
+      <strong id="calObjLabel">—</strong>
+      <button class="btn ghost" id="calObjChange" style="padding:6px 10px">change</button>
+    </div>
+    <div id="calStageWrap" style="position:relative;background:#0d0c10;border:1px solid var(--line);
+         border-radius:10px;overflow:hidden;touch-action:none">
+      <canvas id="calCanvas" style="display:block;width:100%;touch-action:none"></canvas>
+      <div id="calHint" style="position:absolute;left:0;right:0;bottom:0;padding:7px 10px;
+           background:rgba(20,18,24,.82);font-size:12px;color:var(--muted)">Freeze the view to begin.</div>
+    </div>
+    <div class="actions" style="margin:10px 0 0">
+      <button class="btn ghost" id="calFreeze">Freeze view</button>
+      <button class="btn ghost" id="calClear">Clear line</button>
+    </div>
+    <div class="row2" style="margin-top:12px">
+      <div><label for="calDist">Distance between your two points</label>
+        <input id="calDist" type="number" step="1" min="0.1" placeholder="e.g. 100"></div>
+      <div><label for="calUnit">Units</label>
+        <select id="calUnit"><option value="1">µm</option><option value="1000">mm</option></select></div>
+    </div>
+    <p class="sub" id="calResult" style="margin-top:10px"></p>
+    <div class="actions">
+      <button class="btn ghost" id="calCancel">Cancel</button>
+      <button class="btn" id="calSave">Save calibration</button>
+    </div>
+    <p class="sub" id="calTable" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px"></p>
+  </div>
+</div>
+
+<!-- ============ SETTINGS SHEET ============ -->
+<div class="sheet" id="settingsSheet" role="dialog" aria-label="Capture settings">
+  <div class="panel">
+    <h2>Capture settings</h2>
+    <div class="sub">Stored on this device.</div>
+    <label for="setCamera">Camera</label>
+    <select id="setCamera"></select>
+    <label>Scale</label>
+    <button class="btn ghost" id="setCalBtn" style="width:100%;justify-content:center">Calibrate scale with a stage micrometer…</button>
+    <p class="sub" id="setCalStatus" style="margin-top:8px"></p>
+    <label for="setMag" style="margin-top:12px">Default magnification</label>
+    <input id="setMag" placeholder="e.g. 10x">
+    <label style="margin-top:12px">Capture quality</label>
+    <label class="sub" style="display:flex;gap:9px;align-items:flex-start;font-weight:400;margin:6px 0">
+      <input type="checkbox" id="setHiRes" style="width:auto;margin-top:2px">
+      <span>Record at the camera's highest resolution and bitrate. Much more real detail; larger files.</span></label>
+    <label class="sub" style="display:flex;gap:9px;align-items:flex-start;font-weight:400;margin:6px 0">
+      <input type="checkbox" id="setLockAF" style="width:auto;margin-top:2px">
+      <span>Lock focus, exposure and white balance while recording, so the phone can't refocus mid-sweep.</span></label>
+    <label class="sub" style="display:flex;gap:9px;align-items:flex-start;font-weight:400;margin:6px 0 4px">
+      <input type="checkbox" id="setSpeedCue" style="width:auto;margin-top:2px">
+      <span>Warn me on screen when I'm sweeping faster than the camera can stay sharp.</span></label>
+    <label for="setQuality">Stitch resolution</label>
+    <select id="setQuality">
+      <option value="768">Standard (768 px frames — fast, older phones)</option>
+      <option value="1024" selected>High (1024 px frames)</option>
+      <option value="1536">Maximum (1536 px frames — needs a strong device)</option>
+    </select>
+    <label for="setMaxCanvas">Max slide size (px)</label>
+    <select id="setMaxCanvas">
+      <option value="4096">4096 × 4096 (phones)</option>
+      <option value="6144">6144 × 6144</option>
+      <option value="8192" selected>8192 × 8192 (recommended on a computer)</option>
+      <option value="12288">12288 × 12288 (needs plenty of RAM)</option>
+    </select>
+    <label>Archive</label>
+    <button class="btn ghost" id="archiveBtn" style="width:100%;justify-content:center">Choose archive folder…</button>
+    <p id="archiveStatus" class="sub" style="margin-top:8px">Not connected.</p>
+    <div class="actions">
+      <button class="btn ghost" id="openVideoBtn">Stitch a video file</button>
+      <button class="btn" id="settingsDone">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ EDIT SHEET ============ -->
+<div class="sheet" id="editSheet" role="dialog" aria-label="Edit slide details">
+  <div class="panel">
+    <h2>Edit details</h2>
+    <label for="editName">Slide name</label>
+    <input id="editName">
+    <label>Objective</label>
+    <div id="editObjGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px"></div>
+    <div class="row2">
+      <div><label for="editMpp">Microns / pixel</label><input id="editMpp" type="number" step="0.0001" min="0"></div>
+      <div><label for="editMag">Magnification</label><input id="editMag"></div>
+    </div>
+    <p class="sub" id="editScaleNote" style="margin:-2px 0 4px"></p>
+    <label for="editStain">Stain</label>
+    <input id="editStain">
+    <label for="editNotes">Notes</label>
+    <textarea id="editNotes"></textarea>
+    <div class="actions">
+      <button class="btn ghost" id="editCancel">Cancel</button>
+      <button class="btn" id="editSave">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ SLIDE DETAIL ============ -->
+<div id="detail">
+  <div id="detailBar">
+    <button class="iconbtn" id="detailBack" aria-label="Back to library">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M15 5l-7 7 7 7"/></svg>
+    </button>
+    <span class="name" id="detailName"></span>
+    <button class="iconbtn" id="detailEdit" aria-label="Edit slide">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 20l4-1L20 7l-3-3L5 16l-1 4Z"/></svg>
+    </button>
+    <button class="iconbtn" id="detailExport" aria-label="Export slide bundle (PNG + metadata + source video)" title="Export bundle">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 15V4m0 0 4 4m-4-4-4 4M5 13v6h14v-6"/></svg>
+    </button>
+    <button class="iconbtn" id="detailDownload" aria-label="Download PNG">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 4v12m0 0 5-5m-5 5-5-5M4 20h16"/></svg>
+    </button>
+    <button class="iconbtn" id="detailDelete" aria-label="Delete slide">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M5 7h14M10 7V5h4v2m-7 0 1 13h8l1-13"/></svg>
+    </button>
+  </div>
+  <div id="viewerWrap">
+    <canvas id="viewerCanvas"></canvas>
+    <div id="scalebar"><span id="scalebarLabel"></span><div class="bar" id="scalebarBar"></div></div>
+    <div id="zoomHint">drag · pinch / scroll to zoom · double-tap</div>
+  </div>
+  <div id="detailMeta">
+    <div class="mgrid" id="metaGrid"></div>
+    <div id="detailNotes"></div>
+  </div>
+</div>
+
+<div id="toast" role="status"></div>
+
+<script>
+'use strict';
+/* =====================================================================
+   SlideStitch — whole-slide imaging in the browser.
+   Registration: FFT phase correlation between consecutive frames
+   (same approach as the original desktop StitcherBase, ported to JS).
+   ===================================================================== */
+
+/* ---------------- FFT + phase correlation core ---------------- */
+function makeFFT(n){
+  const levels=Math.log2(n)|0;
+  const rev=new Uint32Array(n);
+  for(let i=0;i<n;i++){let x=i,r=0;for(let j=0;j<levels;j++){r=(r<<1)|(x&1);x>>=1;}rev[i]=r;}
+  const cos=new Float64Array(n/2),sin=new Float64Array(n/2);
+  for(let i=0;i<n/2;i++){cos[i]=Math.cos(2*Math.PI*i/n);sin[i]=Math.sin(2*Math.PI*i/n);}
+  return function(re,im,inv){
+    for(let i=0;i<n;i++){const j=rev[i];if(j>i){let t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t;}}
+    for(let size=2;size<=n;size<<=1){
+      const half=size>>1,step=n/size;
+      for(let i=0;i<n;i+=size)for(let j=i,k=0;j<i+half;j++,k+=step){
+        const c=cos[k],s=inv?sin[k]:-sin[k],l=j+half;
+        const tre=re[l]*c-im[l]*s,tim=re[l]*s+im[l]*c;
+        re[l]=re[j]-tre;im[l]=im[j]-tim;re[j]+=tre;im[j]+=tim;
+      }
+    }
+    if(inv)for(let i=0;i<n;i++){re[i]/=n;im[i]/=n;}
+  };
+}
+function makeFFT2D(n){
+  const f=makeFFT(n),rr=new Float64Array(n),ri=new Float64Array(n);
+  return function(re,im,inv){
+    for(let y=0;y<n;y++){const o=y*n;
+      for(let x=0;x<n;x++){rr[x]=re[o+x];ri[x]=im[o+x];}
+      f(rr,ri,inv);
+      for(let x=0;x<n;x++){re[o+x]=rr[x];im[o+x]=ri[x];}}
+    for(let x=0;x<n;x++){
+      for(let y=0;y<n;y++){rr[y]=re[y*n+x];ri[y]=im[y*n+x];}
+      f(rr,ri,inv);
+      for(let y=0;y<n;y++){re[y*n+x]=rr[y];im[y*n+x]=ri[y];}}
+  };
+}
+function makePreprocessor(n){
+  const hann=new Float64Array(n);
+  for(let i=0;i<n;i++)hann[i]=0.5-0.5*Math.cos(2*Math.PI*i/(n-1));
+  const tmp=new Float64Array(n*n),integ=new Float64Array((n+1)*(n+1));
+  return function(gray,out,radius){
+    const w=n+1;
+    for(let x=0;x<=n;x++)integ[x]=0;
+    for(let y=1;y<=n;y++){let rs=0;integ[y*w]=0;
+      for(let x=1;x<=n;x++){rs+=gray[(y-1)*n+(x-1)];integ[y*w+x]=integ[(y-1)*w+x]+rs;}}
+    for(let y=0;y<n;y++){
+      const y0=Math.max(0,y-radius),y1=Math.min(n,y+radius+1);
+      for(let x=0;x<n;x++){
+        const x0=Math.max(0,x-radius),x1=Math.min(n,x+radius+1);
+        const area=(y1-y0)*(x1-x0);
+        const s=integ[y1*w+x1]-integ[y0*w+x1]-integ[y1*w+x0]+integ[y0*w+x0];
+        tmp[y*n+x]=gray[y*n+x]-s/area;
+      }}
+    let ss=0;for(let i=0;i<n*n;i++)ss+=tmp[i]*tmp[i];
+    const norm=ss>1e-9?1/Math.sqrt(ss/(n*n)):0;
+    for(let y=0;y<n;y++){const hy=hann[y];
+      for(let x=0;x<n;x++)out[y*n+x]=tmp[y*n+x]*norm*hy*hann[x];}
+  };
+}
+function makePhaseCorrelator(n){
+  const fft2d=makeFFT2D(n);
+  const aRe=new Float64Array(n*n),aIm=new Float64Array(n*n);
+  const bRe=new Float64Array(n*n),bIm=new Float64Array(n*n);
+  return function(a,b){
+    aRe.set(a);aIm.fill(0);bRe.set(b);bIm.fill(0);
+    fft2d(aRe,aIm,false);fft2d(bRe,bIm,false);
+    for(let i=0;i<n*n;i++){
+      const re=aRe[i]*bRe[i]+aIm[i]*bIm[i];
+      const im=aIm[i]*bRe[i]-aRe[i]*bIm[i];
+      const mag=Math.sqrt(re*re+im*im)+1e-12;
+      aRe[i]=re/mag;aIm[i]=im/mag;
+    }
+    fft2d(aRe,aIm,true);
+    let peak=-Infinity,pi=0;
+    for(let i=0;i<n*n;i++)if(aRe[i]>peak){peak=aRe[i];pi=i;}
+    const py=(pi/n)|0,px=pi%n;
+    const at=(y,x)=>aRe[((y+n)%n)*n+((x+n)%n)];
+    const cx=at(py,px),lx=at(py,px-1),rx=at(py,px+1),uy=at(py-1,px),dn=at(py+1,px);
+    let sx=0,sy=0;
+    const dxden=lx-2*cx+rx,dyden=uy-2*cx+dn;
+    if(Math.abs(dxden)>1e-9)sx=Math.max(-0.5,Math.min(0.5,0.5*(lx-rx)/dxden));
+    if(Math.abs(dyden)>1e-9)sy=Math.max(-0.5,Math.min(0.5,0.5*(uy-dn)/dyden));
+    let dx=px+sx,dy=py+sy;
+    if(dx>n/2)dx-=n; if(dy>n/2)dy-=n;
+    let side=0,cnt=0;
+    for(let y=0;y<n;y+=3)for(let x=0;x<n;x+=3){
+      let ddx=Math.abs(x-px);if(ddx>n/2)ddx=n-ddx;
+      let ddy=Math.abs(y-py);if(ddy>n/2)ddy=n-ddy;
+      if(ddx>5||ddy>5){const v=aRe[y*n+x];side+=v*v;cnt++;}
+    }
+    const resp=peak/(Math.sqrt(side/Math.max(cnt,1))*20+1e-9);
+    return {dx,dy,response:resp};
+  };
+}
+
+/* ---------------- Stitcher ---------------- */
+const REG=256;
+const preprocess=makePreprocessor(REG);
+const correlate=makePhaseCorrelator(REG);
+
+const Stitcher={
+  prev:null, x:0, y:0, discarded:0, fovMask:null,
+  MIN_SHIFT:1.5, MAX_SHIFT:REG*0.4, CONF:0.75, MAX_DISCARDED:20,
+  kfs:[], kfSpacing:50, lastKfX:1e9, lastKfY:1e9, relocTick:0,
+  reset(){this.prev=null;this.x=0;this.y=0;this.discarded=0;
+    this.kfs=[];this.lastKfX=1e9;this.lastKfY=1e9;this.relocTick=0;},
+  update(gray){
+    const buf=new Float64Array(REG*REG);
+    preprocess(gray,buf,10);
+    // Mask out the static eyepiece rim (feathered, applied to the high-passed
+    // signal so the rim's stationary edges can't pin the correlation at zero).
+    if(this.fovMask){const m=this.fovMask;for(let i=0;i<buf.length;i++)buf[i]*=m[i];}
+    if(!this.prev){this.prev=buf;this._maybeKeyframe(buf);return{status:'first',x:0,y:0,response:1};}
+    const r=correlate(this.prev,buf);
+    const dist=Math.hypot(r.dx,r.dy);
+    if(r.response<this.CONF||dist>this.MAX_SHIFT){
+      this.discarded++;
+      if(this.discarded>this.MAX_DISCARDED){
+        // Re-localize against the map of places we've already been
+        // (the global_finder idea from the original desktop program).
+        this.relocTick++;
+        const nk=this.kfs.length;
+        for(let k=0;k<2&&nk;k++){
+          const kf=this.kfs[nk-1-((this.relocTick*2+k)%nk)];
+          const rr=correlate(kf.b,buf);
+          if(rr.response>=this.CONF&&Math.hypot(rr.dx,rr.dy)<=this.MAX_SHIFT){
+            this.x=kf.x+rr.dx;this.y=kf.y+rr.dy;
+            this.prev=buf;this.discarded=0;
+            return{status:'recovered',x:this.x,y:this.y,response:rr.response};
+          }
+        }
+        return{status:'lost',x:this.x,y:this.y,response:r.response};
+      }
+      return{status:'discarded',x:this.x,y:this.y,response:r.response};
+    }
+    this.discarded=0;
+    if(dist<this.MIN_SHIFT)return{status:'still',x:this.x,y:this.y,response:r.response};
+    this.x+=r.dx;this.y+=r.dy;this.prev=buf;
+    this._maybeKeyframe(buf);
+    return{status:'ok',x:this.x,y:this.y,response:r.response};
+  },
+  _maybeKeyframe(buf){
+    if(Math.hypot(this.x-this.lastKfX,this.y-this.lastKfY)<=this.kfSpacing)return;
+    this.kfs.push({b:Float32Array.from(buf),x:this.x,y:this.y});
+    if(this.kfs.length>80)this.kfs.shift();
+    this.lastKfX=this.x;this.lastKfY=this.y;
+  }
+};
+
+/* ---------------- Field-of-view calibration (FrameAnalyzer's role) ----------------
+   Bright-field microscopy through an eyepiece = bright circle inside a black rim.
+   Max-hold over the first frames of a capture fills tissue with bright background,
+   then thresholding finds the circular field. Registration and compositing are
+   masked to inside it. Full-frame sources (USB scope cams) are detected and left
+   unmasked. */
+const CALIB_FRAMES=20;
+/* Sweep-speed cue. On the archived scans, frames captured while the stage moved
+   faster than ~5.5 REG px/frame were markedly softer (sharpness correlates
+   -0.56 with speed), so that is where the on-screen warning sits. */
+const SPEED_WARN=5.5;
+let sweepSpeed=0,lastTrackX=-1e9,lastTrackY=-1e9;
+let fov=null;                 // {cx,cy,r} in REG coords, or null = full frame
+let fovDiaNativePx=0;         // eyepiece field-stop diameter in native camera px
+function nativeSquarePx(){
+  const w=video&&video.videoWidth||0,h=video&&video.videoHeight||0;
+  return w&&h?Math.min(w,h):0;
+}
+let calib=null;               // {maxHold:Float64Array, n} while calibrating
+function startCalibration(){calib={maxHold:new Float64Array(REG*REG).fill(0),n:0};fov=null;fovDiaNativePx=0;Stitcher.fovMask=null;}
+function calibrationStep(gray){
+  const m=calib.maxHold;
+  for(let i=0;i<m.length;i++)if(gray[i]>m[i])m[i]=gray[i];
+  calib.n++;
+  if(calib.n<CALIB_FRAMES)return false;
+  computeFov(calib.maxHold);
+  calib=null;
+  return true;
+}
+function computeFov(maxHold){
+  // robust dark/bright levels via sampled percentiles
+  const sample=[];
+  for(let i=0;i<maxHold.length;i+=7)sample.push(maxHold[i]);
+  sample.sort((a,b)=>a-b);
+  const dark=sample[(sample.length*0.05)|0], bright=sample[(sample.length*0.95)|0];
+  if(bright-dark<30){fov=null;return;}           // flat image — no rim
+  const thr=dark+0.30*(bright-dark);
+  let area=0,sx=0,sy=0;
+  for(let y=0;y<REG;y++)for(let x=0;x<REG;x++){
+    if(maxHold[y*REG+x]>thr){area++;sx+=x;sy+=y;}
+  }
+  const coverage=area/(REG*REG);
+  if(coverage>0.92||area<400){fov=null;fovDiaNativePx=nativeSquarePx();Stitcher.MAX_SHIFT=REG*0.4;return;}  // full-frame source
+  const cx=sx/area, cy=sy/area, r=Math.sqrt(area/Math.PI);
+  fov={cx,cy,r};
+  // physical-scale calibration: the field-stop circle in native camera pixels
+  fovDiaNativePx=(2*r/REG)*nativeSquarePx();
+  Stitcher.MAX_SHIFT=r*1.05;          // allow any shift that still overlaps the field
+  Stitcher.kfSpacing=r*0.5;
+  // feathered registration mask: 1 inside 0.72r, fades to 0 by 0.90r
+  const mask=new Float64Array(REG*REG);
+  const r0=r*0.72, r1=Math.min(r*0.90,REG*0.70);
+  for(let y=0;y<REG;y++)for(let x=0;x<REG;x++){
+    const d=Math.hypot(x-cx,y-cy);
+    mask[y*REG+x]=d<=r0?1:d>=r1?0:0.5+0.5*Math.cos(Math.PI*(d-r0)/(r1-r0));
+  }
+  Stitcher.fovMask=mask;
+}
+
+/* ---------------- Sharpness (blur gate) ----------------
+   Laplacian variance inside the FOV; soft frames still track but are not pasted,
+   so the mosaic is built from the crispest frames instead of a blurry average. */
+function frameSharpness(gray){
+  let sum=0,sum2=0,n=0;
+  const cx=fov?fov.cx:REG/2, cy=fov?fov.cy:REG/2, rr=fov?fov.r*0.8:REG/2;
+  const y0=Math.max(2,(cy-rr)|0), y1=Math.min(REG-2,(cy+rr)|0);
+  const x0=Math.max(2,(cx-rr)|0), x1=Math.min(REG-2,(cx+rr)|0);
+  for(let y=y0;y<y1;y+=2)for(let x=x0;x<x1;x+=2){
+    const i=y*REG+x;
+    const v=4*gray[i]-gray[i-2]-gray[i+2]-gray[i-2*REG]-gray[i+2*REG];
+    sum+=v;sum2+=v*v;n++;
+  }
+  if(!n)return 0;
+  const mean=sum/n;
+  return sum2/n-mean*mean;
+}
+const sharpHist=[];
+function sharpnessOK(s){
+  sharpHist.push(s);
+  if(sharpHist.length>40)sharpHist.shift();
+  if(sharpHist.length<8)return true;
+  const sorted=[...sharpHist].sort((a,b)=>a-b);
+  const median=sorted[sorted.length>>1];
+  return s>=median*0.55;
+}
+
+/* ---------------- Settings (localStorage, guarded) ---------------- */
+const store={
+  get(k,d){try{const v=localStorage.getItem('slidestitch:'+k);return v===null?d:JSON.parse(v);}catch(e){return d;}},
+  set(k,v){try{localStorage.setItem('slidestitch:'+k,JSON.stringify(v));}catch(e){}}
+};
+const settings={
+  mpp:store.get('mpp',null), mag:store.get('mag',''),
+  quality:store.get('quality',1024), maxCanvas:store.get('maxCanvas',8192),
+  cameraId:store.get('cameraId',null),
+  objective:store.get('objective',null),          // numeric objective power, e.g. 20
+  calib:store.get('calib',{}),                    // objective -> {mpp,um,px,at} from a stage micrometer
+  hiRes:store.get('hiRes',true),                  // request the camera's highest resolution
+  lockAF:store.get('lockAF',true),                // lock focus/exposure/WB while recording
+  speedCue:store.get('speedCue',true)             // warn when the sweep outruns sharpness
+};
+
+/* ---------------- Magnification & scale calibration ----------------
+   Scale comes from measuring a stage micrometer, and nothing else.
+
+   An earlier version derived um/px from the eyepiece field stop
+   (fieldNumber/objective over the measured circle diameter). That was withdrawn
+   on 2026-08-29: the field-stop detector thresholds on brightness and cannot
+   tell dark tissue from the outside of the field, so the diameter it returns
+   moved by a factor of two within a single scan (radius 715 -> 658 -> 301 px on
+   one 20x video). It is fine for building a soft registration mask, which is
+   what it was written for, but it is not a measuring instrument. Do not
+   reintroduce it.
+
+   Objective RATIOS are trustworthy, though — cross-magnification template
+   matching on the 2026-08-28 scans recovered the true 2x and 4x relationships
+   to within 2%. So one calibrated objective gives the rest, as long as the
+   phone's own zoom has not changed between them. */
+const OBJECTIVES=[2,4,10,20,40,60,100];
+
+// settings.calib maps objective -> {mpp, um, px, at, derived}
+function calibEntry(objective){
+  if(!objective)return null;
+  const c=settings.calib[String(objective)];
+  return (c&&Number(c.mpp)>0)?c:null;
+}
+function nativeMppFor(objective){
+  if(!objective)return null;
+  const own=calibEntry(objective);
+  if(own)return Number(own.mpp);
+  // derive from any other calibrated objective via the magnification ratio
+  for(const k of Object.keys(settings.calib)){
+    const c=settings.calib[k],o=Number(k);
+    if(o>0&&c&&Number(c.mpp)>0)return Number(c.mpp)*o/objective;
+  }
+  return null;
+}
+function mppIsDerived(objective){
+  return !!(objective&&!calibEntry(objective)&&nativeMppFor(objective));
+}
+function calibratedObjectives(){
+  return Object.keys(settings.calib).filter(k=>Number(settings.calib[k]&&settings.calib[k].mpp)>0)
+    .map(Number).sort((a,b)=>a-b);
+}
+// um/px of a stitched composite built from `cap`-pixel frames at zoom `zoom`
+function compositeMpp(nativeMpp,nativeSquarePx,cap,zoom){
+  if(!nativeMpp||!nativeSquarePx||!cap)return null;
+  const v=nativeMpp*(nativeSquarePx/cap)/(zoom||1);
+  return Math.round(v*10000)/10000;
+}
+function magLabel(o){return o?o+'\u00d7':'';}
+// Larger slides than expected are common — lift older, smaller canvas settings.
+if(settings.maxCanvas<8192&&!store.get('maxCanvasUser',false)){settings.maxCanvas=8192;store.set('maxCanvas',8192);}
+
+/* ---------------- Platform: iPhone / iPad / installed web app ----------------
+   The same file runs on the Mac (Chrome, archive folder on disk) and on an
+   iPhone held to the eyepiece (Safari or the Home Screen app). On the phone the
+   live stitch is a preview + map; the recorded source video is the master and
+   is kept inside the app until it is exported to the Mac. */
+const IS_IOS=/iP(hone|ad|od)/.test(navigator.userAgent)
+  ||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+const IS_STANDALONE=(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches)
+  ||navigator.standalone===true;
+// Safari caps <canvas> at 4096² (iOS ≤17) or 8192² (iOS 18+); a bigger canvas
+// silently becomes blank. Probe the real ceiling once instead of guessing.
+function probeCanvasCeiling(){
+  for(const n of [8192,6144,4096,2048]){
+    try{
+      const c=document.createElement('canvas');c.width=n;c.height=n;
+      const x=c.getContext('2d');if(!x)continue;
+      x.fillStyle='#fff';x.fillRect(n-1,n-1,1,1);
+      const p=x.getImageData(n-1,n-1,1,1).data;
+      c.width=1;c.height=1;               // release the memory immediately
+      if(p[3]===255)return n;
+    }catch(e){}
+  }
+  return 2048;
+}
+const CANVAS_CEILING=probeCanvasCeiling();
+// Phones also have far less canvas memory than a Mac: default to 4096 there
+// unless the user has explicitly chosen otherwise in Settings.
+if(IS_IOS&&!store.get('maxCanvasUser',false)&&settings.maxCanvas>4096){settings.maxCanvas=4096;store.set('maxCanvas',4096);}
+function effectiveMaxCanvas(){return Math.min(Number(settings.maxCanvas)||8192,CANVAS_CEILING);}
+
+/* ---------------- IndexedDB slide database ---------------- */
+const DB_NAME='slidestitch-db';
+let dbPromise=null;
+function openDB(){
+  if(dbPromise)return dbPromise;
+  dbPromise=new Promise((res,rej)=>{
+    const req=indexedDB.open(DB_NAME,2);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains('slides')){
+        const s=db.createObjectStore('slides',{keyPath:'id'});
+        s.createIndex('createdAt','createdAt');
+      }
+      if(!db.objectStoreNames.contains('kv'))db.createObjectStore('kv');
+    };
+    req.onsuccess=()=>res(req.result);
+    req.onerror=()=>rej(req.error);
+  });
+  return dbPromise;
+}
+async function kvGet(k){const db=await openDB();return new Promise((res,rej)=>{
+  const req=db.transaction('kv').objectStore('kv').get(k);
+  req.onsuccess=()=>res(req.result);req.onerror=()=>rej(req.error);});}
+async function kvSet(k,v){const db=await openDB();return new Promise((res,rej)=>{
+  const tx=db.transaction('kv','readwrite');tx.objectStore('kv').put(v,k);
+  tx.oncomplete=res;tx.onerror=()=>rej(tx.error);});}
+async function dbPut(rec){const db=await openDB();return new Promise((res,rej)=>{
+  const tx=db.transaction('slides','readwrite');tx.objectStore('slides').put(rec);
+  tx.oncomplete=res;tx.onerror=()=>rej(tx.error);});}
+async function dbAll(){const db=await openDB();return new Promise((res,rej)=>{
+  const req=db.transaction('slides').objectStore('slides').index('createdAt').getAll();
+  req.onsuccess=()=>res(req.result.reverse());req.onerror=()=>rej(req.error);});}
+async function dbGet(id){const db=await openDB();return new Promise((res,rej)=>{
+  const req=db.transaction('slides').objectStore('slides').get(id);
+  req.onsuccess=()=>res(req.result);req.onerror=()=>rej(req.error);});}
+async function dbDelete(id){const db=await openDB();return new Promise((res,rej)=>{
+  const tx=db.transaction('slides','readwrite');tx.objectStore('slides').delete(id);
+  tx.oncomplete=res;tx.onerror=()=>rej(tx.error);});}
+
+if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
+
+/* ---------------- Archive: organized folders on this computer ----------------
+   Uses the File System Access API (Chrome/Edge on desktop). Each saved slide
+   becomes  <ArchiveFolder>/<date>_<name>/  containing:
+     slide.png   — the stitched whole-slide image
+     meta.json   — all metadata (name, mpp, stain, dims, capture info)
+     source.*    — the raw sweep video (the re-processable master record)   */
+let archiveHandle=null;
+const archiveSupported=typeof window.showDirectoryPicker==='function';
+async function loadArchiveHandle(){
+  try{
+    const h=await kvGet('archiveDir');
+    if(h)archiveHandle=h;
+  }catch(e){}
+  updateArchiveUI();
+}
+async function archivePermissionOK(){
+  if(!archiveHandle)return false;
+  try{
+    let p=await archiveHandle.queryPermission({mode:'readwrite'});
+    if(p==='granted')return true;
+    p=await archiveHandle.requestPermission({mode:'readwrite'});
+    return p==='granted';
+  }catch(e){return false;}
+}
+async function chooseArchiveFolder(){
+  try{
+    const h=await window.showDirectoryPicker({mode:'readwrite'});
+    archiveHandle=h;
+    try{await kvSet('archiveDir',h);}catch(e){}
+    updateArchiveUI();
+    toast('Archive folder connected.');
+  }catch(e){/* user cancelled */}
+}
+function updateArchiveUI(){
+  const btn=$('archiveBtn'),st=$('archiveStatus');
+  if(!btn)return;
+  if(!archiveSupported){
+    btn.disabled=true;
+    st.textContent=IS_IOS
+      ?'On iPhone every scan is kept in the app library together with its source video. Open a slide and tap Export to send the bundle (slide + video + metadata) to the Mac via Save to Files / AirDrop.'
+      :'Folder archiving needs Chrome or Edge on a computer. On this device, slides stay in the app library with their source video; use Export on a slide to get the bundle out.';
+    return;
+  }
+  st.textContent=archiveHandle
+    ?('Connected: every save writes slide + video + metadata into "'+(archiveHandle.name||'archive')+'".')
+    :'Not connected — slides stay in the app library only.';
+  btn.textContent=archiveHandle?'Change archive folder…':'Choose archive folder…';
+}
+function safeFolderName(name){
+  return name.replace(/[^\w\- ]+/g,'').trim().replace(/ +/g,'_').slice(0,60)||'slide';
+}
+async function writeArchive(rec,videoBlob,videoExt){
+  if(!archiveHandle)return false;
+  if(!await archivePermissionOK()){toast('Archive folder permission was declined — slide kept in library only.');return false;}
+  const stamp=new Date(rec.createdAt);
+  const folderName=stamp.toISOString().slice(0,10)+'_'+safeFolderName(rec.name);
+  let dir, base=folderName, i=2;
+  while(true){
+    try{await archiveHandle.getDirectoryHandle(base);base=folderName+'-'+(i++);}  // exists → suffix
+    catch(e){break;}
+  }
+  dir=await archiveHandle.getDirectoryHandle(base,{create:true});
+  async function writeFile(fname,data){
+    const fh=await dir.getFileHandle(fname,{create:true});
+    const w=await fh.createWritable();
+    await w.write(data);
+    await w.close();
+  }
+  await writeFile('slide.png',rec.image);
+  const meta={...rec};delete meta.image;delete meta.thumb;
+  meta.app='SlideStitch';meta.schema=1;
+  await writeFile('meta.json',JSON.stringify(meta,null,2));
+  if(videoBlob)await writeFile('source.'+(videoExt||'webm'),videoBlob);
+  rec.archiveFolder=base;
+  return base;
+}
+
+/* Correcting the objective after the fact has to reach the archived meta.json,
+   because that is what the offline enhancer reads to set the OME-TIFF units. */
+async function rewriteArchiveMeta(rec){
+  if(!archiveHandle||!rec||!rec.archiveFolder)return false;
+  try{
+    if(!await archivePermissionOK())return false;
+    const dir=await archiveHandle.getDirectoryHandle(rec.archiveFolder);
+    const meta={...rec};delete meta.image;delete meta.thumb;
+    meta.app='SlideStitch';meta.schema=1;
+    const fh=await dir.getFileHandle('meta.json',{create:true});
+    const w=await fh.createWritable();
+    await w.write(JSON.stringify(meta,null,2));
+    await w.close();
+    return true;
+  }catch(e){return false;}
+}
+
+/* ---------------- Source video recording (live captures) ---------------- */
+let mediaRecorder=null,recChunks=null,lastVideoBitrate=null,lastLocks=null;
+
+/* The recorded video is the archival master that every future re-stitch works
+   from, so it is worth spending bits on. The browser default (~2.5 Mbit/s at
+   1080p) throws away fine nuclear texture; ~0.3 bits per pixel keeps it. */
+function chosenBitrate(){
+  const t=mediaStream&&mediaStream.getVideoTracks()[0];
+  const st=t&&t.getSettings?t.getSettings():{};
+  const w=st.width||video.videoWidth||1920, h=st.height||video.videoHeight||1080;
+  const fps=st.frameRate||30;
+  if(!settings.hiRes)return Math.round(Math.min(w*h*fps*0.12,2.5e7));
+  return Math.round(Math.max(1.2e7,Math.min(w*h*fps*0.30,8e7)));
+}
+
+/* Autofocus hunting mid-sweep is a measurable cause of soft regions, so pin the
+   camera down once recording starts. Support varies by browser; whatever the
+   platform refuses is simply left on automatic and recorded in the metadata. */
+async function lockCameraForSweep(){
+  lastLocks=null;
+  const t=mediaStream&&mediaStream.getVideoTracks()[0];
+  if(!t||!t.applyConstraints||!settings.lockAF)return;
+  const caps=t.getCapabilities?t.getCapabilities():{};
+  const got=[];
+  for(const [key,val,label] of [['focusMode','manual','focus'],
+                                ['exposureMode','manual','exposure'],
+                                ['whiteBalanceMode','manual','white balance']]){
+    const supported=caps[key]&&caps[key].indexOf?caps[key].indexOf(val)>=0:false;
+    const modes=supported?[val]:['continuous'];
+    if(!supported)continue;
+    try{await t.applyConstraints({advanced:[{[key]:modes[0]}]});got.push(label);}catch(e){}
+  }
+  lastLocks=got.length?got.join(', '):'none supported';
+  if(got.length)toast('Locked '+lastLocks+' for this sweep.');
+}
+
+/* Keep the screen awake for the whole sweep (a scan is minutes long and the
+   phone would otherwise dim, sleep and stop the camera). */
+let wakeLock=null;
+async function acquireWakeLock(){
+  try{
+    if(!('wakeLock' in navigator))return;
+    wakeLock=await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release',()=>{wakeLock=null;});
+  }catch(e){wakeLock=null;}
+}
+function releaseWakeLock(){try{if(wakeLock)wakeLock.release();}catch(e){}wakeLock=null;}
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&capturing&&!wakeLock)acquireWakeLock();
+});
+
+/* The raw sweep video is the archival master — it is recorded on EVERY live
+   capture. On a computer with an archive folder it is written there; otherwise
+   (iPhone, or no folder chosen) it is kept inside the slide record in the app
+   library until the slide is exported. */
+function startVideoRecording(){
+  mediaRecorder=null;recChunks=null;lastVideoBitrate=null;
+  lockCameraForSweep();
+  acquireWakeLock();
+  if(!mediaStream||typeof MediaRecorder==='undefined')return;
+  try{
+    const mime=['video/mp4','video/webm;codecs=vp9','video/webm'].find(m=>MediaRecorder.isTypeSupported(m))||'';
+    const br=chosenBitrate();
+    const opts={};
+    if(mime)opts.mimeType=mime;
+    opts.videoBitsPerSecond=br;
+    try{mediaRecorder=new MediaRecorder(mediaStream,opts);lastVideoBitrate=br;}
+    catch(e){mediaRecorder=new MediaRecorder(mediaStream,mime?{mimeType:mime}:undefined);}
+    recChunks=[];
+    mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
+    mediaRecorder.start(1000);
+  }catch(e){mediaRecorder=null;}
+}
+
+/* Release the locks so the preview is usable again between scans. */
+async function unlockCamera(){
+  const t=mediaStream&&mediaStream.getVideoTracks()[0];
+  if(!t||!t.applyConstraints)return;
+  for(const key of ['focusMode','exposureMode','whiteBalanceMode']){
+    try{await t.applyConstraints({advanced:[{[key]:'continuous'}]});}catch(e){}
+  }
+}
+function stopVideoRecording(){
+  return new Promise(res=>{
+    if(!mediaRecorder||mediaRecorder.state==='inactive'){res(null);return;}
+    const mr=mediaRecorder;
+    mr.onstop=()=>{
+      const type=mr.mimeType||'video/webm';
+      const ext=type.includes('mp4')?'mp4':'webm';
+      res(recChunks&&recChunks.length?{blob:new Blob(recChunks,{type}),ext}:null);
+    };
+    try{mr.stop();}catch(e){res(null);}
+  });
+}
+
+/* ---------------- DOM helpers ---------------- */
+const $=id=>document.getElementById(id);
+function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');
+  clearTimeout(toast._h);toast._h=setTimeout(()=>t.classList.remove('show'),2400);}
+function fmtDate(ts){return new Date(ts).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});}
+function fmtSize(b){return b>1048576?(b/1048576).toFixed(1)+' MB':Math.round(b/1024)+' KB';}
+function physSize(w,h,mpp){
+  if(!mpp)return null;
+  const mmw=w*mpp/1000,mmh=h*mpp/1000;
+  return mmw.toFixed(2)+' × '+mmh.toFixed(2)+' mm';
+}
+
+/* ---------------- Capture pipeline ---------------- */
+const video=$('video');
+let mediaStream=null, usingFileSource=false, videoDevices=[], curDeviceIdx=0;
+let capturing=false, rafId=null;
+
+// working canvases
+const grabCanvas=document.createElement('canvas'); grabCanvas.width=REG; grabCanvas.height=REG;
+const grabCtx=grabCanvas.getContext('2d',{willReadFrequently:true});
+let frameCanvas=null, frameCtx=null, maskCanvas=null;   // full-quality frame + feather mask
+let compCanvas=null, compCtx=null;                       // growing composite
+let comp={ox:0,oy:0,minX:0,minY:0,maxX:0,maxY:0,scale:1,lastPasteX:0,lastPasteY:0,frames:0,startT:0};
+const grayBuf=new Float64Array(REG*REG);
+
+function buildFrameCanvases(cap){
+  frameCanvas=document.createElement('canvas');frameCanvas.width=cap;frameCanvas.height=cap;
+  frameCtx=frameCanvas.getContext('2d');
+  maskCanvas=document.createElement('canvas');maskCanvas.width=cap;maskCanvas.height=cap;
+  const mctx=maskCanvas.getContext('2d');
+  mctx.clearRect(0,0,cap,cap);
+  const sc=cap/REG;
+  // Tighter feather than v1: each region comes mostly from one frame, so
+  // micro-misalignments no longer average into blur.
+  let cx,cy,r0,r1;
+  if(fov){cx=fov.cx*sc;cy=fov.cy*sc;r0=fov.r*sc*0.62;r1=fov.r*sc*0.86;}
+  else{cx=cap/2;cy=cap/2;r0=cap*0.36;r1=cap*0.49;}
+  const g=mctx.createRadialGradient(cx,cy,r0,cx,cy,r1);
+  g.addColorStop(0,'rgba(0,0,0,1)');g.addColorStop(1,'rgba(0,0,0,0)');
+  mctx.fillStyle=g;mctx.fillRect(0,0,cap,cap);
+}
+function grabGray(){
+  const vw=video.videoWidth,vh=video.videoHeight;
+  if(!vw||!vh)return false;
+  const s=Math.min(vw,vh);
+  grabCtx.drawImage(video,(vw-s)/2,(vh-s)/2,s,s,0,0,REG,REG);
+  const d=grabCtx.getImageData(0,0,REG,REG).data;
+  for(let i=0,p=0;i<grayBuf.length;i++,p+=4)
+    grayBuf[i]=0.299*d[p]+0.587*d[p+1]+0.114*d[p+2];
+  return true;
+}
+function ensureCompCapacity(px,py,capz){
+  // Grow the composite when pasting near an edge; at the size ceiling,
+  // zoom the whole composite out instead of ever clipping tissue.
+  for(let guard=0;guard<5;guard++){
+    const margin=Math.ceil(capz*0.3);
+    const needL=px<margin,needT=py<margin,
+        needR=px+capz>compCanvas.width-margin,needB=py+capz>compCanvas.height-margin;
+    if(!(needL||needT||needR||needB))return true;
+    const GROW=1024,MAX=effectiveMaxCanvas();
+    const nw=compCanvas.width+((needL?GROW:0)+(needR?GROW:0));
+    const nh=compCanvas.height+((needT?GROW:0)+(needB?GROW:0));
+    if(nw<=MAX&&nh<=MAX){
+      regrow(nw,nh,needL?GROW:0,needT?GROW:0);
+      px+=needL?GROW:0;py+=needT?GROW:0;
+    }else{
+      rescaleComposite(0.75);
+      px*=0.75;py*=0.75;capz*=0.75;
+    }
+  }
+  return true;
+}
+function regrow(nw,nh,dx,dy){
+  const nc=document.createElement('canvas');nc.width=nw;nc.height=nh;
+  const nctx=nc.getContext('2d');
+  nctx.drawImage(compCanvas,dx,dy);
+  compCanvas=nc;compCtx=nctx;
+  comp.ox+=dx;comp.oy+=dy;
+  comp.minX+=dx;comp.maxX+=dx;comp.minY+=dy;comp.maxY+=dy;
+  comp.lastPasteX+=dx;comp.lastPasteY+=dy;
+  if(dx||dy)tileMap.clear();
+  return true;
+}
+function rescaleComposite(f){
+  const nc=document.createElement('canvas');nc.width=compCanvas.width;nc.height=compCanvas.height;
+  const nctx=nc.getContext('2d');
+  nctx.drawImage(compCanvas,0,0,Math.round(compCanvas.width*f),Math.round(compCanvas.height*f));
+  compCanvas=nc;compCtx=nctx;
+  comp.ox*=f;comp.oy*=f;comp.minX*=f;comp.minY*=f;comp.maxX*=f;comp.maxY*=f;
+  comp.lastPasteX*=f;comp.lastPasteY*=f;comp.zoom*=f;
+  tileMap.clear();
+  if(!comp.zoomNoted){comp.zoomNoted=true;
+    toast('Slide is larger than the max canvas — continuing at reduced resolution.');}
+}
+/* Sharper-frame-wins pasting: a coarse per-tile sharpness map lets a later,
+   crisper pass overwrite an earlier blurry one instead of averaging into mush.
+   Tiles are tested against the actual painted DISC (not its bounding box),
+   so corners are never falsely marked as covered. */
+const tileMap=new Map();const TILE=128;
+function discOf(px,py,cap){
+  const z=comp.zoom,sc=cap/REG;
+  const cx=px+(fov?fov.cx*sc:cap/2)*z, cy=py+(fov?fov.cy*sc:cap/2)*z;
+  const r=(fov?fov.r*sc*0.86:cap*0.49)*z;
+  return {cx,cy,r};
+}
+function tileImproveAndMark(px,py,cap,s){
+  const d=discOf(px,py,cap);
+  const x0=Math.max(0,((d.cx-d.r)/TILE)|0),x1=((d.cx+d.r)/TILE)|0;
+  const y0=Math.max(0,((d.cy-d.r)/TILE)|0),y1=((d.cy+d.r)/TILE)|0;
+  let better=0,empty=0,total=0;
+  const rin=d.r*0.92;
+  for(let ty=y0;ty<=y1;ty++)for(let tx=x0;tx<=x1;tx++){
+    const tcx=(tx+0.5)*TILE,tcy=(ty+0.5)*TILE;
+    if(Math.hypot(tcx-d.cx,tcy-d.cy)>rin)continue;
+    total++;
+    const cur=tileMap.get(ty*4096+tx);
+    if(cur===undefined){empty++;better++;}
+    else if(s>cur*1.08)better++;
+  }
+  if(total===0)return false;
+  if(empty===0&&better/total<0.15)return false;
+  for(let ty=y0;ty<=y1;ty++)for(let tx=x0;tx<=x1;tx++){
+    const tcx=(tx+0.5)*TILE,tcy=(ty+0.5)*TILE;
+    if(Math.hypot(tcx-d.cx,tcy-d.cy)>rin)continue;
+    const k=ty*4096+tx,cur=tileMap.get(k);
+    if(cur===undefined||s>cur)tileMap.set(k,s);
+  }
+  return true;
+}
+function pasteFrame(px,py,cap){
+  // px,py: top-left in composite coords (already zoom-scaled)
+  const z=comp.zoom,cz=cap*z;
+  const vw=video.videoWidth,vh=video.videoHeight,s=Math.min(vw,vh);
+  frameCtx.globalCompositeOperation='source-over';
+  frameCtx.clearRect(0,0,cap,cap);
+  frameCtx.drawImage(video,(vw-s)/2,(vh-s)/2,s,s,0,0,cap,cap);
+  frameCtx.globalCompositeOperation='destination-in';
+  frameCtx.drawImage(maskCanvas,0,0);
+  compCtx.drawImage(frameCanvas,px,py,cz,cz);
+  const sc=cap/REG;
+  const bx=(fov?fov.cx*sc:cap/2)*z, by=(fov?fov.cy*sc:cap/2)*z, br=(fov?fov.r*sc*0.86:cap*0.49)*z;
+  comp.minX=Math.min(comp.minX,px+bx-br);comp.minY=Math.min(comp.minY,py+by-br);
+  comp.maxX=Math.max(comp.maxX,px+bx+br);comp.maxY=Math.max(comp.maxY,py+by+br);
+  comp.frames++;
+}
+function setStatus(cls,text){
+  const p=$('statusPill');p.className='pill '+cls;$('statusText').textContent=text;
+  // Tracking ring: only meaningful while capturing
+  const ring=$('trackRing');
+  if(!capturing){ring.className='';return;}
+  ring.className=cls==='live'||cls==='ok'?'ok':cls==='warn'?'warn':cls==='crit'?'crit':'';
+}
+function updateHUD(resp){
+  if(resp!==undefined){$('confPill').style.display='';$('confPill').textContent='conf '+Math.min(resp,9.99).toFixed(2);}
+  if(capturing){
+    const w=Math.max(0,Math.round(comp.maxX-comp.minX)),h=Math.max(0,Math.round(comp.maxY-comp.minY));
+    $('dimPill').style.display='';$('dimText').textContent=w+' × '+h+' px · '+comp.frames+' frames';
+  }
+}
+let miniTick=0;
+function drawMinimap(curX,curY,cap){
+  if(++miniTick%6)return;
+  const mm=$('minimap'),mctx=mm.getContext('2d');
+  const w=comp.maxX-comp.minX,h=comp.maxY-comp.minY;
+  if(w<10||h<10)return;
+  $('minimapWrap').style.display='block';
+  const sc=Math.min(150/w,150/h);
+  const dw=Math.round(w*sc),dh=Math.round(h*sc);
+  mm.width=dw;mm.height=dh;
+  mctx.fillStyle='#0d0c10';mctx.fillRect(0,0,dw,dh);
+  mctx.drawImage(compCanvas,comp.minX,comp.minY,w,h,0,0,dw,dh);
+  mctx.strokeStyle='#e05a80';mctx.lineWidth=2;
+  const bs=cap*sc;
+  mctx.strokeRect((curX-comp.minX)*sc,(curY-comp.minY)*sc,bs,bs);
+}
+
+let softStreak=0,frameErrors=0,idleTick=0;
+function processFrame(){
+  try{
+    processFrameInner();
+  }catch(e){
+    // A processing error must never silently kill the frame loop.
+    frameErrors++;
+    console.error('frame error:',e);
+    setStatus('crit','processing error — '+(e.message||e));
+  }
+  if(frameErrors<200)scheduleNext();
+}
+function processFrameInner(){
+  if(!grabGray())return;
+
+  // Calibration phase: learn the field-of-view mask before stitching starts.
+  if(capturing&&calib){
+    setStatus('warn','calibrating — keep the view steady');
+    if(calibrationStep(grayBuf)){
+      buildFrameCanvases(frameCanvas?frameCanvas.width:(Number(settings.quality)||1024));
+      Stitcher.reset();
+      if(usingFileSource){try{video.currentTime=0;}catch(e){}}  // re-stitch file from the top
+      setStatus('live','stitching');
+    }
+    return;
+  }
+
+  const r=Stitcher.update(grayBuf);
+  const cap=frameCanvas?frameCanvas.width:(Number(settings.quality)||1024), scale=cap/REG;
+  if(capturing){
+    const place=()=>[comp.ox+r.x*scale*comp.zoom, comp.oy+r.y*scale*comp.zoom];
+    if(r.status==='ok'||r.status==='first'||r.status==='recovered'){
+      let [px,py]=place();
+      const capz=cap*comp.zoom;
+      const moved=Math.hypot(px-comp.lastPasteX,py-comp.lastPasteY);
+      const sharp=frameSharpness(grayBuf);
+      if(sharpnessOK(sharp))softStreak=0;else softStreak++;
+      const candidate=r.status==='first'||moved>capz*0.025||(++idleTick%8===0);
+      if(candidate&&(r.status==='first'||tileImproveAndMark(px,py,cap,sharp))){
+        ensureCompCapacity(px,py,capz);
+        [px,py]=place();                       // recompute after regrow/rescale
+        pasteFrame(px,py,cap);
+        comp.lastPasteX=px;comp.lastPasteY=py;
+      }
+      const step=Math.hypot(px-lastTrackX,py-lastTrackY)/Math.max(cap*comp.zoom,1)*REG;
+      if(isFinite(step)&&lastTrackX>-1e8)sweepSpeed=sweepSpeed*0.8+step*0.2;
+      lastTrackX=px;lastTrackY=py;
+      const tooFast=settings.speedCue&&sweepSpeed>SPEED_WARN;
+      setStatus(r.status==='recovered'?'ok':(tooFast?'warn':'live'),
+        r.status==='recovered'?'track reacquired ✓':
+        tooFast?'slow down — sweeping faster than the camera stays sharp':
+        softStreak>10?'image soft — check focus':'stitching');
+      drawMinimap(place()[0],place()[1],cap*comp.zoom);
+    }
+    else if(r.status==='still'){sweepSpeed*=0.8;setStatus('live','stitching');}
+    else if(r.status==='discarded'){setStatus('warn','tracking unsure — slow down / hold steady');}
+    else if(r.status==='lost'){setStatus('crit','LOST — move back over scanned tissue');}
+    updateHUD(r.response);
+  } else {
+    setStatus(r.status==='ok'||r.status==='still'||r.status==='first'?'ok':'warn',
+      r.status==='ok'||r.status==='still'||r.status==='first'?'ready — tracking good':'ready — low detail');
+    updateHUD(r.response);
+  }
+}
+let framePending=false;
+function scheduleNext(){
+  if(!mediaStream&&!usingFileSource)return;
+  if(framePending)return;
+  framePending=true;
+  const tick=()=>{framePending=false;processFrame();};
+  if('requestVideoFrameCallback' in HTMLVideoElement.prototype)
+    rafId=video.requestVideoFrameCallback(tick);
+  else rafId=requestAnimationFrame(tick);
+}
+
+function startCapture(){
+  if(!settings.objective){
+    openObjectiveSheet(()=>startCapture(),
+      'Before this scan: which objective is in place? This is what turns the finished slide into real microns.');
+    return;
+  }
+  const cap=Number(settings.quality)||1024;
+  buildFrameCanvases(cap);
+  compCanvas=document.createElement('canvas');
+  compCanvas.width=2048;compCanvas.height=2048;
+  compCtx=compCanvas.getContext('2d');
+  Stitcher.reset();
+  sharpHist.length=0;softStreak=0;idleTick=0;
+  sweepSpeed=0;lastTrackX=-1e9;lastTrackY=-1e9;
+  tileMap.clear();
+  startCalibration();
+  comp={ox:(2048-cap)/2,oy:(2048-cap)/2,minX:1e9,minY:1e9,maxX:-1e9,maxY:-1e9,
+        scale:cap/REG,zoom:1,zoomNoted:false,
+        lastPasteX:-1e9,lastPasteY:-1e9,frames:0,startT:Date.now()};
+  capturing=true;
+  frameErrors=0;
+  // A calibration made at a different camera zoom no longer applies.
+  (function(){
+    const c=calibEntry(settings.objective),z=currentZoom();
+    if(c&&c.zoom&&z&&Math.abs(c.zoom-z)>0.05)
+      toast('Camera zoom is '+z.toFixed(1)+'× but '+magLabel(settings.objective)+' was calibrated at '+Number(c.zoom).toFixed(1)+'× — the scale will be off.');
+  })();
+  startVideoRecording();
+  $('recBtn').classList.add('rec');
+  setStatus('warn','calibrating — keep the view steady');
+  scheduleNext();   // revive the loop if anything ever stalled it
+}
+async function finishCapture(){
+  capturing=false;calib=null;
+  unlockCamera();
+  releaseWakeLock();
+  $('recBtn').classList.remove('rec');
+  $('minimapWrap').style.display='none';
+  $('dimPill').style.display='none';
+  const recorded=await stopVideoRecording();
+  if(comp.frames<2){setStatus('ok','ready');toast('Not enough movement captured — nothing to save.');return;}
+  const w=Math.round(comp.maxX-comp.minX),h=Math.round(comp.maxY-comp.minY);
+  const out=document.createElement('canvas');out.width=w;out.height=h;
+  out.getContext('2d').drawImage(compCanvas,comp.minX,comp.minY,w,h,0,0,w,h);
+  let videoBlob=null,videoExt=null;
+  if(recorded){videoBlob=recorded.blob;videoExt=recorded.ext;}
+  else if(usingFileSource&&currentVideoFile){
+    videoBlob=currentVideoFile;
+    videoExt=(currentVideoFile.name.split('.').pop()||'mp4').toLowerCase().slice(0,5);
+  }
+  pendingResult={canvas:out,w,h,frames:comp.frames,
+    durationSec:Math.round((Date.now()-comp.startT)/1000),
+    deviceLabel:currentDeviceLabel(),videoBlob,videoExt,
+    compZoom:+comp.zoom.toFixed(3),
+    fovDiaNativePx:fovDiaNativePx||null,
+    nativeSquarePx:nativeSquarePx()||null,
+    cap:frameCanvas?frameCanvas.width:(Number(settings.quality)||1024),
+    captureW:video.videoWidth||null,captureH:video.videoHeight||null,
+    cameraZoom:usingFileSource?null:(currentZoom()||null),
+    platform:IS_IOS?(IS_STANDALONE?'ios-homescreen':'ios-safari'):'desktop',
+    videoBitrate:lastVideoBitrate||null,locks:lastLocks||null};
+  openSaveSheet();
+  setStatus('ok','ready');
+}
+
+/* ---------------- Camera management ---------------- */
+function currentDeviceLabel(){
+  if(usingFileSource)return 'video file';
+  const t=mediaStream&&mediaStream.getVideoTracks()[0];
+  return t?t.label||'camera':'camera';
+}
+async function listCameras(){
+  try{
+    const devs=await navigator.mediaDevices.enumerateDevices();
+    videoDevices=devs.filter(d=>d.kind==='videoinput');
+    const sel=$('setCamera');sel.innerHTML='';
+    videoDevices.forEach((d,i)=>{
+      const o=document.createElement('option');
+      o.value=d.deviceId;o.textContent=d.label||('Camera '+(i+1));
+      sel.appendChild(o);
+    });
+    if(settings.cameraId)sel.value=settings.cameraId;
+  }catch(e){}
+}
+function showSafariHint(){
+  $('safariHint').classList.remove('hidden');
+}
+$('copyLinkBtn').addEventListener('click',async()=>{
+  const url=location.href;
+  $('copyLinkOut').textContent=url;
+  try{
+    await navigator.clipboard.writeText(url);
+    $('copyLinkBtn').textContent='Link copied — paste it in Safari';
+  }catch(e){
+    $('copyLinkBtn').textContent='Copy blocked — long-press the link below';
+  }
+});
+async function startCamera(deviceId){
+  stopFileSource();
+  if(mediaStream)mediaStream.getTracks().forEach(t=>t.stop());
+  $('camErr').style.color='var(--muted)';
+  $('camErr').textContent='Requesting camera permission…';
+  // Resolution is the single biggest lever on final detail, so ask for the most
+  // the camera will give and step down until one is granted.
+  const ladder=settings.hiRes
+    ? [{width:{ideal:3840},height:{ideal:2160}},
+       {width:{ideal:2560},height:{ideal:1440}},
+       {width:{ideal:1920},height:{ideal:1080}}]
+    : [{width:{ideal:1920},height:{ideal:1080}}];
+  const mkConstraints=base=>deviceId?{video:{...base,frameRate:{ideal:30},deviceId:{exact:deviceId}}}
+                                    :{video:{...base,frameRate:{ideal:30},facingMode:'environment'}};
+  // If no permission prompt ever appears (common in embedded in-app viewers),
+  // the getUserMedia promise can hang forever. Surface guidance instead of silence.
+  const hangTimer=setTimeout(()=>{
+    $('camErr').textContent='No camera prompt appeared.';
+    showSafariHint();
+  },IS_IOS?20000:6000);
+  try{
+    let lastErr=null;
+    for(const base of ladder){
+      try{mediaStream=await navigator.mediaDevices.getUserMedia(mkConstraints(base));break;}
+      catch(err){lastErr=err;mediaStream=null;}
+    }
+    if(!mediaStream)throw lastErr||new Error('no camera');
+    clearTimeout(hangTimer);
+    video.srcObject=mediaStream;
+    await video.play().catch(()=>{});
+    $('camMsg').style.display='none';
+    $('camErr').textContent='';
+    const st=mediaStream.getVideoTracks()[0]&&mediaStream.getVideoTracks()[0].getSettings?
+             mediaStream.getVideoTracks()[0].getSettings():{};
+    if(st.width&&st.height)toast('Camera: '+st.width+'\u00d7'+st.height+(st.frameRate?' @'+Math.round(st.frameRate)+'fps':''));
+    setupZoomControl();
+    await listCameras();
+    Stitcher.reset();
+    scheduleNext();
+  }catch(e){
+    clearTimeout(hangTimer);
+    $('camMsg').style.display='flex';
+    $('camErr').style.color='var(--crit)';
+    if(e.name==='NotAllowedError'||e.name==='SecurityError'){
+      $('camErr').textContent='Camera access was blocked ('+e.name+').';
+      showSafariHint();
+    }else if(e.name==='NotFoundError'){
+      $('camErr').textContent='No camera was found on this device.';
+    }else{
+      $('camErr').textContent='Could not start camera: '+(e.message||e.name)+'.';
+      showSafariHint();
+    }
+  }
+}
+function stopFileSource(){
+  if(usingFileSource){usingFileSource=false;video.src='';video.removeAttribute('src');}
+}
+
+/* Optical zoom on the phone camera (iOS 17+, Android Chrome). At the eyepiece
+   the field circle is often small at 1×; 2–3× fills the sensor with tissue.
+   Zoom changes the µm/px, so it is recorded with every calibration and scan. */
+let cameraZoom=null;
+function currentZoom(){
+  const t=mediaStream&&mediaStream.getVideoTracks()[0];
+  const st=t&&t.getSettings?t.getSettings():{};
+  return typeof st.zoom==='number'?st.zoom:cameraZoom;
+}
+function setupZoomControl(){
+  const pill=$('zoomPill'),sl=$('zoomSlider');
+  const t=mediaStream&&mediaStream.getVideoTracks()[0];
+  const caps=t&&t.getCapabilities?t.getCapabilities():{};
+  const z=caps.zoom;
+  if(!z||!(z.max>z.min)){pill.style.display='none';cameraZoom=null;return;}
+  sl.min=z.min;sl.max=Math.min(z.max,10);sl.step=z.step||0.1;
+  const cur=(t.getSettings&&t.getSettings().zoom)||z.min;
+  sl.value=cur;cameraZoom=cur;$('zoomText').textContent=Number(cur).toFixed(1)+'×';
+  pill.style.display='';
+  const want=store.get('cameraZoom',null);
+  if(want&&want>=z.min&&want<=z.max&&Math.abs(want-cur)>0.05)applyZoom(want);
+}
+async function applyZoom(v){
+  const t=mediaStream&&mediaStream.getVideoTracks()[0];
+  if(!t)return;
+  try{await t.applyConstraints({advanced:[{zoom:v}]});cameraZoom=v;
+    $('zoomSlider').value=v;$('zoomText').textContent=Number(v).toFixed(1)+'×';store.set('cameraZoom',v);}
+  catch(e){}
+}
+$('zoomSlider').addEventListener('input',e=>applyZoom(Number(e.target.value)));
+let currentVideoFile=null;
+async function startVideoFile(file){
+  if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
+  usingFileSource=true;
+  currentVideoFile=file;
+  video.srcObject=null;
+  video.src=URL.createObjectURL(file);
+  video.loop=false;
+  $('camMsg').style.display='none';
+  await video.play().catch(()=>{});
+  Stitcher.reset();
+  startCapture();
+  toast('Stitching video — it will finish automatically.');
+  scheduleNext();
+}
+video.addEventListener('ended',()=>{if(usingFileSource&&capturing)finishCapture();});
+
+/* ---------------- Save sheet ---------------- */
+let pendingResult=null;
+function defaultName(){
+  const d=new Date();
+  return 'Slide '+d.toISOString().slice(0,10)+' '+d.toTimeString().slice(0,5);
+}
+let saveObjective=null;
+function refreshSaveScale(){
+  const r=pendingResult||{};
+  const nat=nativeMppFor(saveObjective);
+  const comp=compositeMpp(nat,r.nativeSquarePx,r.cap,r.compZoom);
+  $('saveMag').value=magLabel(saveObjective);
+  if(comp)$('saveMpp').value=comp;
+  $('saveScaleNote').textContent=nat
+    ? 'Native camera scale '+nat.toFixed(4)+' \u00b5m/px'+(mppIsDerived(saveObjective)?' (derived from another objective)':'')
+      +' \u2192 this stitched image '+(comp?comp.toFixed(4):'\u2014')+' \u00b5m/px. The enhanced OME-TIFF gets the native scale.'
+    : (saveObjective?'No calibration for '+magLabel(saveObjective)+' \u2014 this slide will be saved without physical units. Settings \u2192 Calibrate scale.'
+                    :'Choose an objective.');
+  buildObjGrid($('saveObjGrid'),saveObjective,o=>{saveObjective=o;refreshSaveScale();});
+}
+function openSaveSheet(){
+  $('saveName').value=defaultName();
+  saveObjective=settings.objective;
+  $('saveMpp').value=settings.mpp??'';
+  $('saveMag').value=settings.mag||'';
+  refreshSaveScale();
+  $('saveStain').value='';$('saveNotes').value='';
+  $('savePreview').src=pendingResult.canvas.toDataURL('image/jpeg',0.7);
+  $('saveMeta').textContent=pendingResult.w+' × '+pendingResult.h+' px · '
+    +pendingResult.frames+' frames · '+pendingResult.durationSec+'s · '+pendingResult.deviceLabel
+    +(pendingResult.compZoom&&pendingResult.compZoom<1?' · scaled ×'+pendingResult.compZoom:'');
+  $('saveSheet').classList.add('open');
+}
+$('discardBtn').addEventListener('click',()=>{
+  pendingResult=null;$('saveSheet').classList.remove('open');toast('Discarded.');
+});
+$('saveBtn').addEventListener('click',async()=>{
+  if(!pendingResult)return;
+  $('saveBtn').disabled=true;
+  try{
+    const blob=await new Promise(r=>pendingResult.canvas.toBlob(r,'image/png'));
+    const tw=320,th=Math.round(320*pendingResult.h/pendingResult.w);
+    const tc=document.createElement('canvas');tc.width=tw;tc.height=th;
+    tc.getContext('2d').drawImage(pendingResult.canvas,0,0,tw,th);
+    const thumb=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.8));
+    const mpp=parseFloat($('saveMpp').value)||null;
+    const natMpp=nativeMppFor(saveObjective);
+    const rec={
+      id:'s'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
+      name:$('saveName').value.trim()||defaultName(),
+      notes:$('saveNotes').value.trim(),
+      stain:$('saveStain').value.trim(),
+      mag:$('saveMag').value.trim(),
+      mpp, createdAt:Date.now(),
+      objective:saveObjective||null,
+      mppNative:natMpp||null,            // um/px of the raw camera frame (the enhancer uses this)
+      mppSource:natMpp?(mppIsDerived(saveObjective)?'derived-from-other-objective':'stage-micrometer'):null,
+      calib:natMpp?JSON.parse(JSON.stringify(settings.calib)):null,
+      nativeSquarePx:pendingResult.nativeSquarePx||null,
+      captureW:pendingResult.captureW||null,captureH:pendingResult.captureH||null,
+      stitchCap:pendingResult.cap||null,
+      videoBitrate:pendingResult.videoBitrate||null,
+      locks:pendingResult.locks||null,
+      cameraZoom:pendingResult.cameraZoom||null,
+      platform:pendingResult.platform||null,
+      widthPx:pendingResult.w,heightPx:pendingResult.h,
+      frames:pendingResult.frames,durationSec:pendingResult.durationSec,
+      deviceLabel:pendingResult.deviceLabel,compZoom:pendingResult.compZoom||1,
+      bytes:blob.size, image:blob, thumb
+    };
+    if(mpp){settings.mpp=mpp;store.set('mpp',mpp);}
+    if(rec.mag){settings.mag=rec.mag;store.set('mag',rec.mag);}
+    if(saveObjective){settings.objective=saveObjective;store.set('objective',saveObjective);}
+    const vb=pendingResult.videoBlob,ve=pendingResult.videoExt;
+    // No archive folder (iPhone, or none chosen): the source video lives in the
+    // library with the slide, so nothing is lost before it reaches the Mac.
+    if(!archiveHandle&&vb){rec.video=vb;rec.videoExt=ve||'mp4';rec.videoBytes=vb.size;}
+    await dbPut(rec);
+    $('saveSheet').classList.remove('open');
+    pendingResult=null;
+    refreshLibrary();
+    if(archiveHandle){
+      try{
+        const folder=await writeArchive(rec,vb,ve);
+        if(folder){rec.archiveFolder=folder;try{await dbPut(rec);}catch(e){}}
+        toast(folder?('Saved + archived to "'+folder+'".'):'Saved to library.');
+      }catch(e){toast('Saved to library, but archiving failed: '+(e.message||e));}
+    }else{
+      toast(rec.video?'Saved to library with its source video ('+fmtSize(rec.videoBytes)+'). Export it to the Mac from the slide page.':'Saved to library.');
+    }
+  }catch(e){toast('Save failed: '+(e.message||e));}
+  $('saveBtn').disabled=false;
+});
+
+/* ---------------- Library ---------------- */
+let allSlides=[];
+async function refreshLibrary(){
+  try{allSlides=await dbAll();}catch(e){allSlides=[];}
+  renderLibrary();
+  updateStorageNote();
+}
+function renderLibrary(){
+  const q=$('searchInput').value.trim().toLowerCase();
+  const list=q?allSlides.filter(s=>
+    (s.name+' '+(s.notes||'')+' '+(s.stain||'')+' '+(s.mag||'')).toLowerCase().includes(q)):allSlides;
+  const grid=$('grid');grid.innerHTML='';
+  $('emptyLib').style.display=list.length?'none':'block';
+  for(const s of list){
+    const card=document.createElement('button');
+    card.className='card';
+    const phys=physSize(s.widthPx,s.heightPx,s.mpp);
+    card.innerHTML='<span class="thumb"><img alt=""></span>'
+      +'<span class="info"><span class="name"></span><span class="meta"></span></span>';
+    card.querySelector('.name').textContent=s.name;
+    card.querySelector('.meta').textContent=
+      new Date(s.createdAt).toLocaleDateString()+' · '+s.widthPx+'×'+s.heightPx+(phys?' · '+phys:'');
+    const img=card.querySelector('img');
+    img.src=URL.createObjectURL(s.thumb);
+    img.onload=()=>URL.revokeObjectURL(img.src);
+    card.addEventListener('click',()=>openDetail(s.id));
+    grid.appendChild(card);
+  }
+}
+$('searchInput').addEventListener('input',renderLibrary);
+async function updateStorageNote(){
+  const n=allSlides.length;
+  let note=n+' slide'+(n===1?'':'s');
+  try{
+    if(navigator.storage&&navigator.storage.estimate){
+      const est=await navigator.storage.estimate();
+      if(est.usage)note+=' · '+fmtSize(est.usage);
+    }
+  }catch(e){}
+  $('storageNote').textContent=note;
+}
+
+/* ---------------- Detail viewer ---------------- */
+let detailSlide=null, detailBitmap=null;
+const vState={x:0,y:0,scale:1};
+const vc=$('viewerCanvas'),vwrap=$('viewerWrap');
+
+async function openDetail(id){
+  detailSlide=await dbGet(id);
+  if(!detailSlide)return;
+  $('detail').classList.add('open');
+  $('detailName').textContent=detailSlide.name;
+  renderMeta();
+  try{detailBitmap=await createImageBitmap(detailSlide.image);}
+  catch(e){ // fallback via object URL
+    detailBitmap=await new Promise((res,rej)=>{
+      const im=new Image();im.onload=()=>res(im);im.onerror=rej;
+      im.src=URL.createObjectURL(detailSlide.image);});
+  }
+  fitViewer();
+  drawViewer();
+}
+function closeDetail(){
+  $('detail').classList.remove('open');
+  if(detailBitmap&&detailBitmap.close)detailBitmap.close();
+  detailBitmap=null;detailSlide=null;
+}
+$('detailBack').addEventListener('click',closeDetail);
+function renderMeta(){
+  const s=detailSlide,g=$('metaGrid');g.innerHTML='';
+  const phys=physSize(s.widthPx,s.heightPx,s.mpp);
+  const items=[
+    ['Captured',fmtDate(s.createdAt)],
+    ['Dimensions',s.widthPx+' × '+s.heightPx+' px'],
+    ['Physical size',phys||'set µm/px to compute'],
+    ['Microns / px',s.mpp!=null?String(s.mpp):'—'],
+    ['Magnification',s.mag||'—'],
+    ['Native µm / px',s.mppNative!=null?Number(s.mppNative).toFixed(4):'—'],
+    ['Stain',s.stain||'—'],
+    ['Frames',String(s.frames)],
+    ['Capture time',s.durationSec+' s'],
+    ['Source',s.deviceLabel||'—'],
+    ['File size',fmtSize(s.bytes||0)],
+    ['Source video',s.video?('in library · '+fmtSize(s.videoBytes||s.video.size||0)):
+                    s.archiveFolder?('archived · '+s.archiveFolder):'not kept'],
+  ];
+  for(const[k,v]of items){
+    const d=document.createElement('div');d.className='mitem';
+    d.innerHTML='<div class="k"></div><div class="v"></div>';
+    d.querySelector('.k').textContent=k;d.querySelector('.v').textContent=v;
+    g.appendChild(d);
+  }
+  $('detailNotes').textContent=s.notes||'';
+}
+function fitViewer(){
+  const r=vwrap.getBoundingClientRect();
+  vc.width=r.width*devicePixelRatio;vc.height=r.height*devicePixelRatio;
+  vc.style.width=r.width+'px';vc.style.height=r.height+'px';
+  if(!detailSlide)return;
+  const sc=Math.min(r.width/detailSlide.widthPx,r.height/detailSlide.heightPx)*0.96;
+  vState.scale=sc;
+  vState.x=(r.width-detailSlide.widthPx*sc)/2;
+  vState.y=(r.height-detailSlide.heightPx*sc)/2;
+}
+function drawViewer(){
+  if(!detailBitmap)return;
+  const ctx=vc.getContext('2d');
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  ctx.fillStyle='#0d0c10';
+  ctx.fillRect(0,0,vc.width,vc.height);
+  ctx.imageSmoothingEnabled=vState.scale<2;
+  ctx.translate(vState.x,vState.y);
+  ctx.scale(vState.scale,vState.scale);
+  ctx.drawImage(detailBitmap,0,0);
+  drawScalebar();
+}
+function drawScalebar(){
+  const s=detailSlide;
+  if(!s||!s.mpp){$('scalebar').style.display='none';return;}
+  // pick a nice length: 10/20/50/100/200/500/1000 µm ≈ 80-160 screen px
+  const candidates=[10,20,50,100,200,500,1000,2000,5000];
+  let best=100;
+  for(const c of candidates){const px=c/s.mpp*vState.scale;if(px>=70&&px<=180){best=c;break;}if(px<70)best=c;}
+  const px=best/s.mpp*vState.scale;
+  if(px<20||px>400){$('scalebar').style.display='none';return;}
+  $('scalebar').style.display='block';
+  $('scalebarLabel').textContent=best>=1000?(best/1000)+' mm':best+' µm';
+  $('scalebarBar').style.width=Math.round(px)+'px';
+}
+// pan/zoom (pointer events; pinch via two pointers)
+const pointers=new Map();
+let lastPinchDist=0;
+vwrap.addEventListener('pointerdown',e=>{
+  vwrap.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pointers.size===2){
+    const p=[...pointers.values()];
+    lastPinchDist=Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y);
+  }
+});
+vwrap.addEventListener('pointermove',e=>{
+  if(!pointers.has(e.pointerId))return;
+  const prev=pointers.get(e.pointerId);
+  pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pointers.size===1){
+    vState.x+=e.clientX-prev.x;vState.y+=e.clientY-prev.y;drawViewer();
+  } else if(pointers.size===2){
+    const p=[...pointers.values()];
+    const d=Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y);
+    if(lastPinchDist>0){
+      const cx=(p[0].x+p[1].x)/2,cy=(p[0].y+p[1].y)/2;
+      zoomAt(cx,cy,d/lastPinchDist);
+    }
+    lastPinchDist=d;
+  }
+});
+function endPointer(e){pointers.delete(e.pointerId);lastPinchDist=0;}
+vwrap.addEventListener('pointerup',endPointer);
+vwrap.addEventListener('pointercancel',endPointer);
+vwrap.addEventListener('wheel',e=>{
+  e.preventDefault();
+  zoomAt(e.clientX,e.clientY,Math.exp(-e.deltaY*0.0015));
+},{passive:false});
+let lastTap=0;
+vwrap.addEventListener('pointerup',e=>{
+  const now=Date.now();
+  if(now-lastTap<300){zoomAt(e.clientX,e.clientY,2);}
+  lastTap=now;
+});
+function zoomAt(cx,cy,factor){
+  const r=vwrap.getBoundingClientRect();
+  const px=cx-r.left,py=cy-r.top;
+  const ns=Math.max(0.02,Math.min(40,vState.scale*factor));
+  const k=ns/vState.scale;
+  vState.x=px-(px-vState.x)*k;
+  vState.y=py-(py-vState.y)*k;
+  vState.scale=ns;
+  drawViewer();
+}
+window.addEventListener('resize',()=>{if($('detail').classList.contains('open')){fitViewer();drawViewer();}});
+
+$('detailDownload').addEventListener('click',async()=>{
+  if(!detailSlide)return;
+  const fname=(detailSlide.name.replace(/[^\w\- ]+/g,'').trim().replace(/ +/g,'_')||'slide')+'.png';
+  await deliverFile(detailSlide.image,fname,'PNG');
+});
+/* ---------------- Export bundle (iPhone → Mac) ----------------
+   One zip per slide, laid out exactly like an archive folder:
+     <date>_<name>/slide.png, meta.json, source.mp4
+   Dropped into the Ditzel folder on the Mac, "Enhance Slides.command" unpacks
+   it and enhances it like any other scan. Store-only zip (no compression —
+   PNG and H.264 are already compressed), written from Blob parts so a 300 MB
+   video never has to be copied into memory as a whole. */
+const CRC_TABLE=(()=>{const t=new Uint32Array(256);
+  for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0;}return t;})();
+async function crc32Blob(blob,onProgress){
+  let crc=0xFFFFFFFF;const CH=8<<20;
+  for(let off=0;off<blob.size;off+=CH){
+    const buf=new Uint8Array(await blob.slice(off,Math.min(blob.size,off+CH)).arrayBuffer());
+    for(let i=0;i<buf.length;i++)crc=CRC_TABLE[(crc^buf[i])&0xFF]^(crc>>>8);
+    if(onProgress)onProgress(Math.min(1,(off+CH)/blob.size));
+  }
+  return (crc^0xFFFFFFFF)>>>0;
+}
+function dosDateTime(d){
+  return {time:((d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1))&0xFFFF,
+          date:(((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate())&0xFFFF};
+}
+async function buildZip(entries,onProgress){   // entries: [{name, blob}]
+  const parts=[],central=[];let offset=0;const enc=new TextEncoder();const now=dosDateTime(new Date());
+  const u16=(v,b,o)=>{b[o]=v&255;b[o+1]=(v>>8)&255;};
+  const u32=(v,b,o)=>{b[o]=v&255;b[o+1]=(v>>>8)&255;b[o+2]=(v>>>16)&255;b[o+3]=(v>>>24)&255;};
+  for(let i=0;i<entries.length;i++){
+    const e=entries[i],nm=enc.encode(e.name),size=e.blob.size;
+    const crc=await crc32Blob(e.blob,p=>onProgress&&onProgress((i+p)/entries.length));
+    const lh=new Uint8Array(30+nm.length);
+    u32(0x04034b50,lh,0);u16(20,lh,4);u16(0x0800,lh,6);u16(0,lh,8);
+    u16(now.time,lh,10);u16(now.date,lh,12);u32(crc,lh,14);u32(size,lh,18);u32(size,lh,22);
+    u16(nm.length,lh,26);u16(0,lh,28);lh.set(nm,30);
+    parts.push(lh,e.blob);
+    const ch=new Uint8Array(46+nm.length);
+    u32(0x02014b50,ch,0);u16(20,ch,4);u16(20,ch,6);u16(0x0800,ch,8);u16(0,ch,10);
+    u16(now.time,ch,12);u16(now.date,ch,14);u32(crc,ch,16);u32(size,ch,20);u32(size,ch,24);
+    u16(nm.length,ch,28);u16(0,ch,30);u16(0,ch,32);u16(0,ch,34);u16(0,ch,36);u32(0,ch,38);
+    u32(offset,ch,42);ch.set(nm,46);
+    central.push(ch);
+    offset+=lh.length+size;
+  }
+  const cdSize=central.reduce((a,c)=>a+c.length,0);
+  const eocd=new Uint8Array(22);
+  u32(0x06054b50,eocd,0);u16(0,eocd,4);u16(0,eocd,6);u16(central.length,eocd,8);u16(central.length,eocd,10);
+  u32(cdSize,eocd,12);u32(offset,eocd,16);u16(0,eocd,20);
+  return new Blob([...parts,...central,eocd],{type:'application/zip'});
+}
+function slideFolderName(rec){
+  return new Date(rec.createdAt).toISOString().slice(0,10)+'_'+safeFolderName(rec.name);
+}
+function slideMetaJSON(rec){
+  const meta={...rec};delete meta.image;delete meta.thumb;delete meta.video;
+  meta.app='SlideStitch';meta.schema=1;
+  return JSON.stringify(meta,null,2);
+}
+async function deliverFile(blob,filename,what){
+  // iPhone / Android: the share sheet (Save to Files → iCloud Drive → the Mac).
+  try{
+    const f=new File([blob],filename,{type:blob.type||'application/octet-stream'});
+    if(navigator.canShare&&navigator.canShare({files:[f]})){
+      await navigator.share({files:[f],title:filename});
+      toast(what+' shared.');return true;
+    }
+  }catch(e){if(e&&e.name==='AbortError')return false;}
+  // Hosted viewer: the runtime's download capability
+  try{
+    if(window.claude&&window.claude.use){
+      const dl=await window.claude.use('downloads');
+      if(dl){
+        try{await dl.save({filename,data:blob});toast('Saved '+filename+'.');}
+        catch(err){
+          if(err&&err.code==='declined'){/* viewer said no — stay quiet */}
+          else if(err&&err.code==='rate_limited')toast('A save prompt is already open — try again in a moment.');
+          else toast('Could not save the file ('+((err&&err.code)||'error')+').');
+        }
+        return true;
+      }
+    }
+  }catch(e){}
+  // Plain browser download
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=filename;
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),60000);
+  toast('Downloading '+filename+'.');
+  return true;
+}
+let exporting=false;
+$('detailExport').addEventListener('click',async()=>{
+  if(!detailSlide||exporting)return;
+  exporting=true;
+  const btn=$('detailExport');btn.style.opacity='.5';
+  try{
+    const folder=slideFolderName(detailSlide);
+    const entries=[{name:folder+'/slide.png',blob:detailSlide.image},
+                   {name:folder+'/meta.json',blob:new Blob([slideMetaJSON(detailSlide)],{type:'application/json'})}];
+    if(detailSlide.video)entries.push({name:folder+'/source.'+(detailSlide.videoExt||'mp4'),blob:detailSlide.video});
+    toast(detailSlide.video?'Packing slide + source video…':'Packing slide…');
+    const zip=await buildZip(entries,p=>{btn.title='Packing '+Math.round(p*100)+'%';});
+    await deliverFile(zip,folder+'.zip','Slide bundle');
+  }catch(e){toast('Export failed: '+(e.message||e));}
+  btn.style.opacity='';btn.title='Export bundle';
+  exporting=false;
+});
+
+$('detailDelete').addEventListener('click',async()=>{
+  if(!detailSlide)return;
+  if(!confirmDelete)return startConfirmDelete();
+});
+let confirmDelete=false,confirmTimer=null;
+function startConfirmDelete(){
+  confirmDelete=true;
+  toast('Tap delete again to confirm.');
+  const btn=$('detailDelete');btn.style.borderColor='var(--crit)';
+  clearTimeout(confirmTimer);
+  confirmTimer=setTimeout(()=>{confirmDelete=false;btn.style.borderColor='';},2600);
+}
+$('detailDelete').addEventListener('click',async()=>{
+  if(!confirmDelete||!detailSlide)return;
+  confirmDelete=false;$('detailDelete').style.borderColor='';
+  await dbDelete(detailSlide.id);
+  closeDetail();
+  toast('Slide deleted.');
+  refreshLibrary();
+});
+
+/* ---------------- Edit sheet ---------------- */
+let editObjective=null;
+function refreshEditScale(){
+  const s=detailSlide||{};
+  const nat=nativeMppFor(editObjective);
+  const comp=compositeMpp(nat,s.nativeSquarePx,s.stitchCap,s.compZoom);
+  $('editMag').value=magLabel(editObjective)||$('editMag').value;
+  if(comp)$('editMpp').value=comp;
+  $('editScaleNote').textContent=nat
+    ? 'Rescaled to '+nat.toFixed(4)+' \u00b5m/px native'+(mppIsDerived(editObjective)?' (derived from another objective)':'')
+      +'. Re-run Enhance Slides to rewrite the OME-TIFF units.'
+    : 'No calibration for this objective yet, so the slide stays without physical units. You can also type \u00b5m/pixel in by hand.';
+  buildObjGrid($('editObjGrid'),editObjective,o=>{editObjective=o;refreshEditScale();});
+}
+$('detailEdit').addEventListener('click',()=>{
+  if(!detailSlide)return;
+  $('editName').value=detailSlide.name;
+  $('editMpp').value=detailSlide.mpp??'';
+  $('editMag').value=detailSlide.mag||'';
+  editObjective=detailSlide.objective||null;
+  refreshEditScale();
+  $('editStain').value=detailSlide.stain||'';
+  $('editNotes').value=detailSlide.notes||'';
+  $('editSheet').classList.add('open');
+});
+$('editCancel').addEventListener('click',()=>$('editSheet').classList.remove('open'));
+$('editSave').addEventListener('click',async()=>{
+  if(!detailSlide)return;
+  detailSlide.name=$('editName').value.trim()||detailSlide.name;
+  detailSlide.mpp=parseFloat($('editMpp').value)||null;
+  detailSlide.mag=$('editMag').value.trim();
+  detailSlide.stain=$('editStain').value.trim();
+  detailSlide.notes=$('editNotes').value.trim();
+  if(editObjective){
+    detailSlide.objective=editObjective;
+    const nat=nativeMppFor(editObjective);
+    detailSlide.mppNative=nat||null;
+    detailSlide.mppSource=nat?(mppIsDerived(editObjective)?'derived-from-other-objective':'stage-micrometer'):null;
+  }
+  await dbPut(detailSlide);
+  await rewriteArchiveMeta(detailSlide);
+  $('editSheet').classList.remove('open');
+  $('detailName').textContent=detailSlide.name;
+  renderMeta();drawScalebar();
+  toast('Details updated.');
+  refreshLibrary();
+});
+
+/* ---------------- Objective picker ----------------
+   Shown before a scan starts (and any time from the HUD pill). The chosen
+   objective plus the eyepiece field number turns the measured field-stop
+   circle into real microns, so the OME-TIFF carries true physical units. */
+function buildObjGrid(el,current,onPick){
+  el.innerHTML='';
+  for(const o of OBJECTIVES){
+    const b=document.createElement('button');
+    b.className='btn'+(o===current?'':' ghost');
+    b.style.cssText='justify-content:center;padding:10px 0';
+    b.textContent=magLabel(o);
+    b.addEventListener('click',()=>onPick(o));
+    el.appendChild(b);
+  }
+}
+let objPending=null,objAfter=null;
+function objectiveScaleNote(objective){
+  if(!objective)return 'Choose an objective.';
+  const own=calibEntry(objective);
+  if(own)return magLabel(objective)+' \u2192 '+Number(own.mpp).toFixed(4)+' \u00b5m/pixel, measured from a stage micrometer.';
+  const m=nativeMppFor(objective);
+  if(m){
+    const from=calibratedObjectives()[0];
+    return magLabel(objective)+' \u2192 '+m.toFixed(4)+' \u00b5m/pixel, derived from your '+magLabel(from)
+      +' calibration. Accurate only if the phone zoom is the same; calibrate '+magLabel(objective)+' directly to be sure.';
+  }
+  return 'No scale yet for '+magLabel(objective)+'. The slide will have no physical units until you calibrate '
+    +'this objective against a stage micrometer (Settings \u2192 Calibrate scale).';
+}
+function openObjectiveSheet(after,reason){
+  objPending=settings.objective; objAfter=after||null;
+  $('objSub').textContent=reason||'Pick the objective on the nosepiece. This sets the scale of the finished slide \u2014 you can correct it afterwards if you pick the wrong one.';
+  const refresh=()=>{
+    buildObjGrid($('objGrid'),objPending,o=>{objPending=o;refresh();});
+    $('objCalc').textContent=objectiveScaleNote(objPending);
+  };
+  refresh();
+  $('objSheet').classList.add('open');
+}
+$('objCancel').addEventListener('click',()=>{
+  objAfter=null;$('objSheet').classList.remove('open');
+});
+$('objDone').addEventListener('click',()=>{
+  if(!objPending){toast('Pick an objective first.');return;}
+  settings.objective=objPending;
+  store.set('objective',settings.objective);
+  settings.mag=magLabel(settings.objective);store.set('mag',settings.mag);
+  $('objSheet').classList.remove('open');
+  syncObjPill();
+  const a=objAfter;objAfter=null;
+  if(a)a();
+});
+$('objPill').addEventListener('click',()=>openObjectiveSheet(null));
+function syncObjPill(){
+  const p=$('objPill');
+  p.textContent=settings.objective?magLabel(settings.objective):'set objective';
+  p.style.color=settings.objective?'':'var(--warn)';
+  const m=nativeMppFor(settings.objective);
+  $('mppPill').textContent=m?(m.toFixed(3)+' \u00b5m/px'+(mppIsDerived(settings.objective)?'*':''))
+                           :'not calibrated';
+  $('mppPill').style.color=m?'':'var(--muted)';
+}
+
+/* ---------------- Stage-micrometer calibration ----------------
+   Everything here works in NATIVE camera pixels: the canvas is drawn from the
+   video at its native resolution, so a distance measured on the canvas is a
+   distance on the sensor, independent of how the preview happens to be laid
+   out on screen. That is the number the enhancer needs. */
+let calState={frozen:false,a:null,b:null,drag:false,objective:null,scale:1};
+function calCanvasSetup(){
+  const c=$('calCanvas'),vw=video.videoWidth||1920,vh=video.videoHeight||1080;
+  c.width=vw;c.height=vh;
+  return c.getContext('2d');
+}
+function calDraw(){
+  const c=$('calCanvas'),ctx=c.getContext('2d');
+  if(!calState.frozen){
+    try{ctx.drawImage(video,0,0,c.width,c.height);}catch(e){}
+  }else if(calState.frame){
+    ctx.putImageData(calState.frame,0,0);
+  }
+  const {a,b}=calState;
+  if(a&&b){
+    ctx.save();
+    ctx.strokeStyle='#ff3b6b';ctx.lineWidth=Math.max(2,c.width/500);
+    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    for(const p of [a,b]){
+      ctx.beginPath();ctx.arc(p.x,p.y,Math.max(5,c.width/180),0,Math.PI*2);
+      ctx.fillStyle='#ff3b6b';ctx.fill();
+      ctx.beginPath();ctx.moveTo(p.x-c.width/60,p.y);ctx.lineTo(p.x+c.width/60,p.y);
+      ctx.moveTo(p.x,p.y-c.width/60);ctx.lineTo(p.x,p.y+c.width/60);
+      ctx.strokeStyle='rgba(255,255,255,.85)';ctx.lineWidth=Math.max(1,c.width/900);ctx.stroke();
+    }
+    ctx.restore();
+  }
+  calUpdateResult();
+}
+function calPointerPos(ev){
+  const c=$('calCanvas'),r=c.getBoundingClientRect();
+  const t=ev.touches&&ev.touches[0]?ev.touches[0]:ev;
+  return {x:(t.clientX-r.left)/r.width*c.width, y:(t.clientY-r.top)/r.height*c.height};
+}
+function calPixels(){
+  const {a,b}=calState;
+  return (a&&b)?Math.hypot(b.x-a.x,b.y-a.y):0;
+}
+function calUpdateResult(){
+  const px=calPixels(),dist=parseFloat($('calDist').value)*Number($('calUnit').value||1);
+  const c=$('calCanvas');
+  if(!calState.frozen){$('calHint').textContent='Live view — press Freeze view when the rulings are sharp.';}
+  else if(!calState.a){$('calHint').textContent='Drag from one ruling mark to another.';}
+  else{$('calHint').textContent='Line spans '+px.toFixed(1)+' native pixels ('+c.width+'\u00d7'+c.height+' sensor frame). Drag again to redo.';}
+  if(px>4&&dist>0){
+    const mpp=dist/px;
+    $('calResult').textContent=magLabel(calState.objective)+' \u2192 '+mpp.toFixed(4)+' \u00b5m/pixel'
+      +'  ('+dist.toFixed(1)+' \u00b5m over '+px.toFixed(1)+' px). A 1000\u00b5m field would be '
+      +Math.round(1000/mpp)+' px across.';
+  }else{
+    $('calResult').textContent=calState.frozen?'Draw a line and enter the distance between the two points.':'';
+  }
+}
+function calRenderTable(){
+  const objs=calibratedObjectives();
+  if(!objs.length){$('calTable').textContent='Nothing calibrated yet.';return;}
+  $('calTable').textContent='Calibrated: '+objs.map(o=>{
+    const c=settings.calib[String(o)];
+    return magLabel(o)+' = '+Number(c.mpp).toFixed(4)+' \u00b5m/px';
+  }).join('  \u00b7  ')+'. Other objectives are derived from these by magnification ratio.';
+}
+function openCalSheet(){
+  calState={frozen:false,a:null,b:null,drag:false,objective:settings.objective,frame:null};
+  if(!calState.objective){
+    openObjectiveSheet(()=>openCalSheet(),'Which objective are you calibrating? The stage micrometer measures one objective at a time.');
+    return;
+  }
+  $('calObjLabel').textContent=magLabel(calState.objective);
+  $('calDist').value='';
+  calCanvasSetup();
+  calRenderTable();
+  $('calSheet').classList.add('open');
+  const loop=()=>{
+    if(!$('calSheet').classList.contains('open'))return;
+    if(!calState.frozen)calDraw();
+    requestAnimationFrame(loop);
+  };
+  loop();
+  calDraw();
+}
+$('calObjChange').addEventListener('click',()=>{
+  $('calSheet').classList.remove('open');
+  openObjectiveSheet(()=>openCalSheet(),'Which objective are you calibrating?');
+});
+$('calFreeze').addEventListener('click',()=>{
+  const c=$('calCanvas'),ctx=c.getContext('2d');
+  if(!calState.frozen){
+    try{ctx.drawImage(video,0,0,c.width,c.height);}catch(e){}
+    calState.frame=ctx.getImageData(0,0,c.width,c.height);
+    calState.frozen=true;$('calFreeze').textContent='Unfreeze';
+  }else{
+    calState.frozen=false;calState.frame=null;$('calFreeze').textContent='Freeze view';
+  }
+  calDraw();
+});
+$('calClear').addEventListener('click',()=>{calState.a=calState.b=null;calDraw();});
+$('calDist').addEventListener('input',calUpdateResult);
+$('calUnit').addEventListener('change',calUpdateResult);
+(function(){
+  const c=$('calCanvas');
+  const down=ev=>{if(!calState.frozen)return;ev.preventDefault();
+    calState.a=calPointerPos(ev);calState.b=calState.a;calState.drag=true;calDraw();};
+  const move=ev=>{if(!calState.drag)return;ev.preventDefault();
+    calState.b=calPointerPos(ev);calDraw();};
+  const up=ev=>{if(!calState.drag)return;calState.drag=false;calDraw();};
+  c.addEventListener('mousedown',down);c.addEventListener('mousemove',move);
+  window.addEventListener('mouseup',up);
+  c.addEventListener('touchstart',down,{passive:false});
+  c.addEventListener('touchmove',move,{passive:false});
+  c.addEventListener('touchend',up);
+})();
+$('calCancel').addEventListener('click',()=>{$('calSheet').classList.remove('open');});
+$('calSave').addEventListener('click',()=>{
+  const px=calPixels(),dist=parseFloat($('calDist').value)*Number($('calUnit').value||1);
+  if(!(px>4)){toast('Draw a line between two ruling marks first.');return;}
+  if(!(dist>0)){toast('Enter how far apart those two points are.');return;}
+  const mpp=dist/px;
+  settings.calib[String(calState.objective)]={mpp,um:dist,px:+px.toFixed(2),
+    at:Date.now(),sensor:$('calCanvas').width+'x'+$('calCanvas').height,
+    zoom:currentZoom()||null,device:currentDeviceLabel()};
+  store.set('calib',settings.calib);
+  $('calSheet').classList.remove('open');
+  syncObjPill();syncSettingsUI();
+  toast(magLabel(calState.objective)+' calibrated: '+mpp.toFixed(4)+' \u00b5m/px');
+});
+$('setCalBtn').addEventListener('click',()=>{$('settingsSheet').classList.remove('open');openCalSheet();});
+
+/* ---------------- Settings ---------------- */
+function syncSettingsUI(){
+  const objs=calibratedObjectives();
+  $('setCalStatus').textContent=objs.length
+    ? 'Calibrated from a stage micrometer: '+objs.map(o=>magLabel(o)+' = '+Number(settings.calib[String(o)].mpp).toFixed(4)+' \u00b5m/px').join(', ')
+      +'. Other objectives are derived from these by magnification ratio.'
+    : 'No scale calibration yet \u2014 slides will be saved without physical units.';
+  $('setMag').value=settings.mag||'';
+  $('setQuality').value=String(settings.quality);
+  $('setMaxCanvas').value=String(settings.maxCanvas);
+  $('setHiRes').checked=!!settings.hiRes;
+  $('setLockAF').checked=!!settings.lockAF;
+  $('setSpeedCue').checked=!!settings.speedCue;
+  syncObjPill();
+}
+$('settingsBtn').addEventListener('click',()=>{syncSettingsUI();$('settingsSheet').classList.add('open');});
+$('settingsDone').addEventListener('click',()=>{
+  settings.mag=$('setMag').value.trim();
+  settings.quality=Number($('setQuality').value);
+  settings.maxCanvas=Number($('setMaxCanvas').value);
+  settings.hiRes=$('setHiRes').checked;
+  settings.lockAF=$('setLockAF').checked;
+  settings.speedCue=$('setSpeedCue').checked;
+  store.set('mag',settings.mag);store.set('hiRes',settings.hiRes);
+  store.set('lockAF',settings.lockAF);store.set('speedCue',settings.speedCue);
+  store.set('quality',settings.quality);store.set('maxCanvas',settings.maxCanvas);store.set('maxCanvasUser',true);
+  const camId=$('setCamera').value;
+  $('settingsSheet').classList.remove('open');
+  syncSettingsUI();
+  if(camId&&camId!==settings.cameraId&&!usingFileSource){
+    settings.cameraId=camId;store.set('cameraId',camId);
+    startCamera(camId);
+  }
+});
+$('flipBtn').addEventListener('click',()=>{
+  if(usingFileSource||!videoDevices.length)return;
+  curDeviceIdx=(curDeviceIdx+1)%videoDevices.length;
+  const id=videoDevices[curDeviceIdx].deviceId;
+  settings.cameraId=id;store.set('cameraId',id);
+  startCamera(id);
+});
+function pickVideoFile(){$('videoFileInput').click();}
+$('openVideoBtn').addEventListener('click',()=>{$('settingsSheet').classList.remove('open');pickVideoFile();});
+$('openVideoBtn2').addEventListener('click',pickVideoFile);
+$('videoFileInput').addEventListener('change',e=>{
+  const f=e.target.files[0];
+  if(f)startVideoFile(f);
+  e.target.value='';
+});
+
+/* ---------------- Record button + tabs ---------------- */
+$('recBtn').addEventListener('click',()=>{
+  if(!mediaStream&&!usingFileSource){toast('Enable the camera first.');return;}
+  if(!capturing)startCapture();else finishCapture();
+});
+document.addEventListener('keydown',e=>{
+  if(e.target.matches('input,textarea,select'))return;
+  const k=e.key.toLowerCase();
+  if(k==='s'&&!capturing&&(mediaStream||usingFileSource))startCapture();
+  else if(k==='f'&&capturing)finishCapture();
+});
+function showView(name){
+  $('capture').classList.toggle('active',name==='capture');
+  $('library').classList.toggle('active',name==='library');
+  $('tabCapture').classList.toggle('on',name==='capture');
+  $('tabLibrary').classList.toggle('on',name==='library');
+  if(name==='library')refreshLibrary();
+}
+$('tabCapture').addEventListener('click',()=>showView('capture'));
+$('tabLibrary').addEventListener('click',()=>showView('library'));
+$('enableCamBtn').addEventListener('click',()=>startCamera(settings.cameraId));
+
+/* ---------------- boot ---------------- */
+$('archiveBtn').addEventListener('click',chooseArchiveFolder);
+syncSettingsUI();
+refreshLibrary();
+loadArchiveHandle();
+if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){
+  $('enableCamBtn').disabled=true;
+  $('camErr').textContent='Camera access is not available in this viewer. You can still stitch a recorded video file.';
+  showSafariHint();
+}
+// Installable web app: cache the shell so it opens instantly (and offline) at the scope.
+if('serviceWorker' in navigator&&location.protocol==='https:'){
+  window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').catch(()=>{});});
+}
+if(IS_IOS&&!IS_STANDALONE){
+  const p=document.createElement('p');
+  p.style.cssText='color:var(--muted);font-size:12px;max-width:34ch';
+  p.textContent='Tip: tap Share → "Add to Home Screen" to install SlideStitch as a full-screen app. Your slides and videos are stored on this phone until you export them.';
+  $('camMsg').appendChild(p);
+}
+</script>
+
+</body>
+</html>
