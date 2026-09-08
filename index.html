@@ -210,6 +210,7 @@
         </span>
       </div>
       <div class="hudcol right">
+        <button class="pill" id="camPill" style="cursor:pointer;font:inherit">name this camera</button>
         <button class="pill" id="objPill" style="cursor:pointer;font:inherit">objective —</button>
         <span class="pill" id="mppPill">-- µm/px</span>
         <span class="pill" id="confPill" style="display:none">conf --</span>
@@ -284,6 +285,28 @@
   </div>
 </div>
 
+<!-- ============ CAMERA SHEET ============ -->
+<div class="sheet" id="camSheet" role="dialog" aria-label="Which camera">
+  <div class="panel">
+    <h2>Which camera is this?</h2>
+    <div class="sub" id="camSub">Scale is measured per camera, so the app needs to know which one it is
+      looking through. A profile is the camera <em>and</em> its adapter — the same body on a C-mount and
+      on an eyepiece adapter are two profiles, because they give different µm/pixel through the same
+      objective.</div>
+    <p class="sub" id="camDetected" style="margin-top:10px"></p>
+    <div id="camListEl" style="display:grid;gap:8px;margin:12px 0"></div>
+    <label for="camNameIn">Name this setup</label>
+    <input id="camNameIn" placeholder="e.g. HAYEAR — eyepiece adapter">
+    <label for="camNoteIn" style="margin-top:10px">Optical path (optional)</label>
+    <input id="camNoteIn" placeholder="e.g. 10× eyepiece adapter, no reducer">
+    <p class="sub" id="camScaleNote" style="margin-top:10px"></p>
+    <div class="actions">
+      <button class="btn ghost" id="camCancel">Cancel</button>
+      <button class="btn" id="camDone">Use this camera</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ OBJECTIVE SHEET ============ -->
 <div class="sheet" id="objSheet" role="dialog" aria-label="Choose objective">
   <div class="panel">
@@ -310,6 +333,11 @@
       <span class="sub" style="margin:0">Objective being calibrated:</span>
       <strong id="calObjLabel">—</strong>
       <button class="btn ghost" id="calObjChange" style="padding:6px 10px">change</button>
+    </div>
+    <div style="margin:0 0 6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="sub" style="margin:0">Camera:</span>
+      <strong id="calCamLabel">—</strong>
+      <button class="btn ghost" id="calCamChange" style="padding:6px 10px">change</button>
     </div>
     <div id="calStageWrap" style="position:relative;background:#0d0c10;border:1px solid var(--line);
          border-radius:10px;overflow:hidden;touch-action:none">
@@ -343,6 +371,8 @@
     <div class="sub">Stored on this device.</div>
     <label for="setCamera">Camera</label>
     <select id="setCamera"></select>
+    <p class="sub" id="setCamProfile" style="margin-top:8px"></p>
+    <button class="btn ghost" id="setCamBtn" style="width:100%;justify-content:center;margin-top:6px">Name this camera / change adapter…</button>
     <label>Scale</label>
     <button class="btn ghost" id="setCalBtn" style="width:100%;justify-content:center">Calibrate scale with a stage micrometer…</button>
     <p class="sub" id="setCalStatus" style="margin-top:8px"></p>
@@ -387,6 +417,9 @@
     <h2>Edit details</h2>
     <label for="editName">Slide name</label>
     <input id="editName">
+    <label>Shot on</label>
+    <select id="editCam" style="margin-bottom:4px"></select>
+    <p class="sub" id="editCamNote" style="margin:0 0 10px"></p>
     <label>Objective</label>
     <div id="editObjGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px"></div>
     <div class="row2">
@@ -688,7 +721,9 @@ const settings={
   quality:store.get('quality',1024), maxCanvas:store.get('maxCanvas',8192),
   cameraId:store.get('cameraId',null),
   objective:store.get('objective',null),          // numeric objective power, e.g. 20
-  calib:store.get('calib',{}),                    // objective -> {mpp,um,px,at} from a stage micrometer
+  calib:store.get('calib',{}),                    // camKey -> objective -> {mpp,um,px,at} from a stage micrometer
+  cameras:store.get('cameras',{}),                // camKey -> {key,name,note,labels,at}
+  camBind:store.get('camBind',{}),                // deviceId -> camKey: which profile this port means now
   hiRes:store.get('hiRes',true),                  // request the camera's highest resolution
   lockAF:store.get('lockAF',true),                // lock focus/exposure/WB while recording
   speedCue:store.get('speedCue',true)             // warn when the sweep outruns sharpness
@@ -706,35 +741,127 @@ const settings={
    what it was written for, but it is not a measuring instrument. Do not
    reintroduce it.
 
-   Objective RATIOS are trustworthy, though — cross-magnification template
-   matching on the 2026-08-28 scans recovered the true 2x and 4x relationships
-   to within 2%. So one calibrated objective gives the rest, as long as the
-   phone's own zoom has not changed between them. */
+   Objective RATIOS are trustworthy WITHIN one camera profile — cross-
+   magnification template matching on the 2026-08-28 scans recovered the true
+   2x and 4x relationships to within 2%. So one calibrated objective gives the
+   rest for that camera, as long as its zoom has not changed. A ratio cancels
+   the objective, not the coupler, so it carries no information at all across
+   cameras and is never applied across profiles. */
 const OBJECTIVES=[2,4,10,20,40,60,100];
 
-// settings.calib maps objective -> {mpp, um, px, at, derived}
-function calibEntry(objective){
-  if(!objective)return null;
-  const c=settings.calib[String(objective)];
+/* ---------------- Camera profiles ----------------
+   µm/px belongs to a camera and its optical path, not to the objective. The
+   iPhone at the eyepiece, an AmScope on a C-mount and a HAYEAR through an
+   eyepiece adapter all give a different µm/px through the same 20× objective,
+   because the coupler in front of the sensor differs. So every micrometer
+   measurement is stored under a camera profile, and no scale is ever carried
+   from one profile to another — not directly and not by magnification ratio.
+
+   A profile is a camera AND its adapter: the same HAYEAR body on a C-mount and
+   on an eyepiece adapter are two profiles, which is why a profile cannot be
+   recognised from the USB device alone. settings.camBind records which profile
+   a given deviceId currently means; changing the adapter means saying so once.
+
+   deviceId is stable per browser but not across browsers, and is empty until
+   camera permission is granted, so a label-derived key is the fallback. */
+let activeCam=store.get('activeCam',null);
+function setActiveCam(key){activeCam=key||null;store.set('activeCam',activeCam);}
+function camProfile(key){return (key&&settings.cameras[key])||null;}
+function camName(key){const p=camProfile(key);return p?p.name:null;}
+function newCamKey(){let n=1;while(settings.cameras['cam'+n])n++;return 'cam'+n;}
+function camDeviceKey(deviceId,label){return deviceId||('label:'+(label||'camera'));}
+function currentCamDeviceKey(){
+  if(usingFileSource)return null;
+  const t=mediaStream&&mediaStream.getVideoTracks()[0];
+  if(!t)return null;
+  const st=t.getSettings?t.getSettings():{};
+  return camDeviceKey(st&&st.deviceId,t.label);
+}
+/* Which profile is the live camera? Null means unknown, and unknown means no
+   scale rather than someone else's scale. */
+function resolveActiveCam(){
+  const dk=currentCamDeviceKey();
+  setActiveCam(dk?(settings.camBind[dk]||null):null);
+  return activeCam;
+}
+function bindCurrentCamera(key){
+  const dk=currentCamDeviceKey();
+  if(dk){settings.camBind[dk]=key;store.set('camBind',settings.camBind);}
+  const p=camProfile(key),lbl=usingFileSource?null:currentDeviceLabel();
+  if(p&&lbl&&(p.labels||[]).indexOf(lbl)<0){p.labels=(p.labels||[]).concat([lbl]);store.set('cameras',settings.cameras);}
+  setActiveCam(key);
+}
+function camList(){
+  return Object.keys(settings.cameras).map(k=>settings.cameras[k])
+    .sort((a,b)=>(a.at||0)-(b.at||0));
+}
+
+/* settings.calib: camKey -> objective -> {mpp, um, px, at, zoom, sensor}
+   Older builds stored objective -> entry with no camera. Each entry recorded
+   the device label it was measured on, so those are moved under a profile
+   built from that label instead of being inherited by whatever camera happens
+   to be plugged in now. */
+function migrateCalib(){
+  const flat=Object.keys(settings.calib).filter(k=>/^[0-9]+(\.[0-9]+)?$/.test(k));
+  if(!flat.length)return;
+  const byLabel={};
+  for(const k of flat){
+    const e=settings.calib[k];delete settings.calib[k];
+    if(!(e&&Number(e.mpp)>0))continue;
+    const label=e.device||'Earlier setup';
+    if(!byLabel[label]){
+      let key=null;
+      for(const ck of Object.keys(settings.cameras))
+        if((settings.cameras[ck].labels||[]).indexOf(label)>=0)key=ck;
+      if(!key){
+        key=newCamKey();
+        settings.cameras[key]={key,name:label,
+          note:'imported from an earlier version — confirm which adapter this was measured through',
+          labels:[label],at:Date.now()};
+      }
+      byLabel[label]=key;
+    }
+    const ck=byLabel[label];
+    if(!settings.calib[ck])settings.calib[ck]={};
+    settings.calib[ck][k]=e;
+  }
+  store.set('calib',settings.calib);store.set('cameras',settings.cameras);
+}
+migrateCalib();
+
+function camCalib(camKey){
+  const c=camKey&&settings.calib[camKey];
+  return (c&&typeof c==='object')?c:{};
+}
+function calibEntry(objective,camKey){
+  if(camKey===undefined)camKey=activeCam;
+  if(!objective||!camKey)return null;
+  const c=camCalib(camKey)[String(objective)];
   return (c&&Number(c.mpp)>0)?c:null;
 }
-function nativeMppFor(objective){
-  if(!objective)return null;
-  const own=calibEntry(objective);
+function nativeMppFor(objective,camKey){
+  if(camKey===undefined)camKey=activeCam;
+  // No profile means no known optical path, and therefore no scale. Guessing
+  // here is exactly how one camera's microns end up stamped on another's slide.
+  if(!objective||!camKey)return null;
+  const own=calibEntry(objective,camKey);
   if(own)return Number(own.mpp);
-  // derive from any other calibrated objective via the magnification ratio
-  for(const k of Object.keys(settings.calib)){
-    const c=settings.calib[k],o=Number(k);
+  // derive from another objective ON THIS CAMERA via the magnification ratio
+  const cal=camCalib(camKey);
+  for(const k of Object.keys(cal)){
+    const c=cal[k],o=Number(k);
     if(o>0&&c&&Number(c.mpp)>0)return Number(c.mpp)*o/objective;
   }
   return null;
 }
-function mppIsDerived(objective){
-  return !!(objective&&!calibEntry(objective)&&nativeMppFor(objective));
+function mppIsDerived(objective,camKey){
+  if(camKey===undefined)camKey=activeCam;
+  return !!(objective&&camKey&&!calibEntry(objective,camKey)&&nativeMppFor(objective,camKey));
 }
-function calibratedObjectives(){
-  return Object.keys(settings.calib).filter(k=>Number(settings.calib[k]&&settings.calib[k].mpp)>0)
-    .map(Number).sort((a,b)=>a-b);
+function calibratedObjectives(camKey){
+  if(camKey===undefined)camKey=activeCam;
+  const cal=camCalib(camKey);
+  return Object.keys(cal).filter(k=>Number(cal[k]&&cal[k].mpp)>0).map(Number).sort((a,b)=>a-b);
 }
 // um/px of a stitched composite built from `cap`-pixel frames at zoom `zoom`
 function compositeMpp(nativeMpp,nativeSquarePx,cap,zoom){
@@ -1258,6 +1385,13 @@ function scheduleNext(){
 }
 
 function startCapture(){
+  // A scan with an unidentified camera would either get no scale or, worse,
+  // inherit another camera's. Settle which camera this is first.
+  if(!(usingFileSource?activeCam:resolveActiveCam())){
+    openCamSheet(()=>startCapture(),
+      'Before this scan: which camera and adapter is this? Scale is stored per camera, so the app will not reuse another camera\u2019s microns.');
+    return;
+  }
   if(!settings.objective){
     openObjectiveSheet(()=>startCapture(),
       'Before this scan: which objective is in place? This is what turns the finished slide into real microns.');
@@ -1280,9 +1414,9 @@ function startCapture(){
   frameErrors=0;
   // A calibration made at a different camera zoom no longer applies.
   (function(){
-    const c=calibEntry(settings.objective),z=currentZoom();
+    const c=calibEntry(settings.objective,activeCam),z=currentZoom();
     if(c&&c.zoom&&z&&Math.abs(c.zoom-z)>0.05)
-      toast('Camera zoom is '+z.toFixed(1)+'× but '+magLabel(settings.objective)+' was calibrated at '+Number(c.zoom).toFixed(1)+'× — the scale will be off.');
+      toast('Camera zoom is '+z.toFixed(1)+'× but '+magLabel(settings.objective)+' was calibrated at '+Number(c.zoom).toFixed(1)+'× on this camera — the scale will be off.');
   })();
   startVideoRecording();
   $('recBtn').classList.add('rec');
@@ -1310,6 +1444,8 @@ async function finishCapture(){
   pendingResult={canvas:out,w,h,frames:comp.frames,
     durationSec:Math.round((Date.now()-comp.startT)/1000),
     deviceLabel:currentDeviceLabel(),videoBlob,videoExt,
+    camKey:activeCam,camName:camName(activeCam),
+    camNote:(camProfile(activeCam)||{}).note||null,
     compZoom:+comp.zoom.toFixed(3),
     fovDiaNativePx:fovDiaNativePx||null,
     nativeSquarePx:nativeSquarePx()||null,
@@ -1391,6 +1527,9 @@ async function startCamera(deviceId){
     if(st.width&&st.height)toast('Camera: '+st.width+'\u00d7'+st.height+(st.frameRate?' @'+Math.round(st.frameRate)+'fps':''));
     setupZoomControl();
     await listCameras();
+    resolveActiveCam();
+    syncObjPill();
+    if(!activeCam)toast('New camera — name it so its scale is kept separate.');
     Stitcher.reset();
     scheduleNext();
   }catch(e){
@@ -1447,6 +1586,9 @@ async function startVideoFile(file){
   if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
   usingFileSource=true;
   currentVideoFile=file;
+  // The file may have been shot on any camera, so the live one's profile must
+  // not carry over. Ask before this becomes a scan.
+  setActiveCam(null);syncObjPill();
   video.srcObject=null;
   video.src=URL.createObjectURL(file);
   video.loop=false;
@@ -1468,15 +1610,20 @@ function defaultName(){
 let saveObjective=null;
 function refreshSaveScale(){
   const r=pendingResult||{};
-  const nat=nativeMppFor(saveObjective);
+  // The scale of the camera this scan was made on, not whatever is plugged in now.
+  const ck=r.camKey||null;
+  const nat=nativeMppFor(saveObjective,ck);
   const comp=compositeMpp(nat,r.nativeSquarePx,r.cap,r.compZoom);
   $('saveMag').value=magLabel(saveObjective);
   if(comp)$('saveMpp').value=comp;
   $('saveScaleNote').textContent=nat
-    ? 'Native camera scale '+nat.toFixed(4)+' \u00b5m/px'+(mppIsDerived(saveObjective)?' (derived from another objective)':'')
+    ? (r.camName||'This camera')+': native scale '+nat.toFixed(4)+' \u00b5m/px'
+      +(mppIsDerived(saveObjective,ck)?' (derived from another objective on this camera)':'')
       +' \u2192 this stitched image '+(comp?comp.toFixed(4):'\u2014')+' \u00b5m/px. The enhanced OME-TIFF gets the native scale.'
-    : (saveObjective?'No calibration for '+magLabel(saveObjective)+' \u2014 this slide will be saved without physical units. Settings \u2192 Calibrate scale.'
-                    :'Choose an objective.');
+    : (!saveObjective?'Choose an objective.'
+       :!ck?'This scan has no camera profile, so it is saved without physical units.'
+       :'No calibration for '+magLabel(saveObjective)+' on '+(r.camName||'this camera')
+        +' \u2014 saved without physical units. Settings \u2192 Calibrate scale.');
   buildObjGrid($('saveObjGrid'),saveObjective,o=>{saveObjective=o;refreshSaveScale();});
 }
 function openSaveSheet(){
@@ -1505,7 +1652,8 @@ $('saveBtn').addEventListener('click',async()=>{
     tc.getContext('2d').drawImage(pendingResult.canvas,0,0,tw,th);
     const thumb=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.8));
     const mpp=parseFloat($('saveMpp').value)||null;
-    const natMpp=nativeMppFor(saveObjective);
+    const camKey=pendingResult.camKey||null;
+    const natMpp=nativeMppFor(saveObjective,camKey);
     const rec={
       id:'s'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
       name:$('saveName').value.trim()||defaultName(),
@@ -1515,8 +1663,9 @@ $('saveBtn').addEventListener('click',async()=>{
       mpp, createdAt:Date.now(),
       objective:saveObjective||null,
       mppNative:natMpp||null,            // um/px of the raw camera frame (the enhancer uses this)
-      mppSource:natMpp?(mppIsDerived(saveObjective)?'derived-from-other-objective':'stage-micrometer'):null,
-      calib:natMpp?JSON.parse(JSON.stringify(settings.calib)):null,
+      mppSource:natMpp?(mppIsDerived(saveObjective,camKey)?'derived-from-other-objective':'stage-micrometer'):null,
+      camera:camKey?{key:camKey,name:pendingResult.camName||null,note:pendingResult.camNote||null}:null,
+      calib:natMpp?JSON.parse(JSON.stringify(camCalib(camKey))):null,
       nativeSquarePx:pendingResult.nativeSquarePx||null,
       captureW:pendingResult.captureW||null,captureH:pendingResult.captureH||null,
       stitchCap:pendingResult.cap||null,
@@ -1867,25 +2016,50 @@ $('detailDelete').addEventListener('click',async()=>{
 });
 
 /* ---------------- Edit sheet ---------------- */
-let editObjective=null;
+let editObjective=null,editCam=null;
 function refreshEditScale(){
   const s=detailSlide||{};
-  const nat=nativeMppFor(editObjective);
+  // Rescale against the camera the slide was SHOT on, never the live one.
+  const nat=nativeMppFor(editObjective,editCam);
   const comp=compositeMpp(nat,s.nativeSquarePx,s.stitchCap,s.compZoom);
   $('editMag').value=magLabel(editObjective)||$('editMag').value;
   if(comp)$('editMpp').value=comp;
   $('editScaleNote').textContent=nat
-    ? 'Rescaled to '+nat.toFixed(4)+' \u00b5m/px native'+(mppIsDerived(editObjective)?' (derived from another objective)':'')
+    ? 'Rescaled to '+nat.toFixed(4)+' \u00b5m/px native on '+(camName(editCam)||'this camera')
+      +(mppIsDerived(editObjective,editCam)?' (derived from another objective on it)':'')
       +'. Re-run Enhance Slides to rewrite the OME-TIFF units.'
-    : 'No calibration for this objective yet, so the slide stays without physical units. You can also type \u00b5m/pixel in by hand.';
+    : (!editCam
+       ? 'This slide has no camera profile, so it has no \u00b5m/pixel. Say which camera shot it above, or type \u00b5m/pixel in by hand.'
+       : 'No calibration for this objective on '+(camName(editCam)||'that camera')+' yet, so the slide stays '
+         +'without physical units. You can also type \u00b5m/pixel in by hand.');
   buildObjGrid($('editObjGrid'),editObjective,o=>{editObjective=o;refreshEditScale();});
 }
+/* Slides recorded before camera profiles existed, or shot on a camera whose
+   profile was renamed, can be attributed here. Nothing else assigns a camera
+   to a slide after the fact. */
+function buildEditCamSelect(){
+  const sel=$('editCam');sel.innerHTML='';
+  const none=document.createElement('option');
+  none.value='';none.textContent='\u2014 not recorded \u2014';sel.appendChild(none);
+  for(const p of camList()){
+    const o=document.createElement('option');o.value=p.key;o.textContent=p.name;sel.appendChild(o);
+  }
+  sel.value=editCam||'';
+  const p=camProfile(editCam);
+  $('editCamNote').textContent=p&&p.note?p.note:(editCam?'':'Set this to give an older slide physical units.');
+}
+$('editCam').addEventListener('change',e=>{
+  editCam=e.target.value||null;
+  buildEditCamSelect();refreshEditScale();
+});
 $('detailEdit').addEventListener('click',()=>{
   if(!detailSlide)return;
   $('editName').value=detailSlide.name;
   $('editMpp').value=detailSlide.mpp??'';
   $('editMag').value=detailSlide.mag||'';
   editObjective=detailSlide.objective||null;
+  editCam=(detailSlide.camera&&detailSlide.camera.key)||null;
+  buildEditCamSelect();
   refreshEditScale();
   $('editStain').value=detailSlide.stain||'';
   $('editNotes').value=detailSlide.notes||'';
@@ -1899,11 +2073,12 @@ $('editSave').addEventListener('click',async()=>{
   detailSlide.mag=$('editMag').value.trim();
   detailSlide.stain=$('editStain').value.trim();
   detailSlide.notes=$('editNotes').value.trim();
+  detailSlide.camera=editCam?{key:editCam,name:camName(editCam),note:(camProfile(editCam)||{}).note||null}:null;
   if(editObjective){
     detailSlide.objective=editObjective;
-    const nat=nativeMppFor(editObjective);
+    const nat=nativeMppFor(editObjective,editCam);
     detailSlide.mppNative=nat||null;
-    detailSlide.mppSource=nat?(mppIsDerived(editObjective)?'derived-from-other-objective':'stage-micrometer'):null;
+    detailSlide.mppSource=nat?(mppIsDerived(editObjective,editCam)?'derived-from-other-objective':'stage-micrometer'):null;
   }
   await dbPut(detailSlide);
   await rewriteArchiveMeta(detailSlide);
@@ -1932,16 +2107,20 @@ function buildObjGrid(el,current,onPick){
 let objPending=null,objAfter=null;
 function objectiveScaleNote(objective){
   if(!objective)return 'Choose an objective.';
-  const own=calibEntry(objective);
-  if(own)return magLabel(objective)+' \u2192 '+Number(own.mpp).toFixed(4)+' \u00b5m/pixel, measured from a stage micrometer.';
-  const m=nativeMppFor(objective);
+  if(!activeCam)return 'No camera profile yet, so there is no scale to apply \u2014 and none will be borrowed from '
+    +'another camera. Name this camera on the pill at the top right, then calibrate it.';
+  const own=calibEntry(objective,activeCam);
+  if(own)return magLabel(objective)+' on '+camName(activeCam)+' \u2192 '+Number(own.mpp).toFixed(4)
+    +' \u00b5m/pixel, measured from a stage micrometer.';
+  const m=nativeMppFor(objective,activeCam);
   if(m){
-    const from=calibratedObjectives()[0];
-    return magLabel(objective)+' \u2192 '+m.toFixed(4)+' \u00b5m/pixel, derived from your '+magLabel(from)
-      +' calibration. Accurate only if the phone zoom is the same; calibrate '+magLabel(objective)+' directly to be sure.';
+    const from=calibratedObjectives(activeCam)[0];
+    return magLabel(objective)+' \u2192 '+m.toFixed(4)+' \u00b5m/pixel, derived from the '+magLabel(from)
+      +' calibration on '+camName(activeCam)+'. Accurate only if the zoom is unchanged; calibrate '
+      +magLabel(objective)+' directly to be sure.';
   }
-  return 'No scale yet for '+magLabel(objective)+'. The slide will have no physical units until you calibrate '
-    +'this objective against a stage micrometer (Settings \u2192 Calibrate scale).';
+  return 'No scale yet for '+magLabel(objective)+' on '+camName(activeCam)+'. The slide will have no physical units '
+    +'until you calibrate this objective on this camera against a stage micrometer (Settings \u2192 Calibrate scale).';
 }
 function openObjectiveSheet(after,reason){
   objPending=settings.objective; objAfter=after||null;
@@ -1975,14 +2154,88 @@ function syncObjPill(){
   $('mppPill').textContent=m?(m.toFixed(3)+' \u00b5m/px'+(mppIsDerived(settings.objective)?'*':''))
                            :'not calibrated';
   $('mppPill').style.color=m?'':'var(--muted)';
+  const cp=$('camPill');
+  if(cp){
+    cp.textContent=activeCam?(camName(activeCam)||'camera'):(usingFileSource?'which camera shot this?':'name this camera');
+    cp.style.color=activeCam?'':'var(--warn)';
+  }
 }
+
+/* ---------------- Camera profile picker ----------------
+   Shown the first time an unfamiliar camera appears, before a scan on an
+   unidentified one, and any time from the HUD pill. Naming a setup is the only
+   way a micrometer measurement gets attached to something, so this is the gate
+   in front of every path that reads or writes a scale. */
+let camPending=null,camAfter=null;
+function openCamSheet(after,reason){
+  camAfter=after||null;
+  camPending=activeCam;
+  $('camSub').textContent=reason||('Scale is measured per camera, so the app needs to know which one it is looking '
+    +'through. A profile is the camera and its adapter \u2014 the same body on a C-mount and on an eyepiece adapter '
+    +'are two profiles, because they give different \u00b5m/pixel through the same objective.');
+  $('camDetected').textContent=usingFileSource
+    ? 'Reading from a video file, so there is no live camera to identify \u2014 pick the setup that recorded it.'
+    : 'The browser reports this camera as \u201c'+currentDeviceLabel()+'\u201d.';
+  refreshCamSheet();
+  $('camSheet').classList.add('open');
+}
+function refreshCamSheet(){
+  const list=$('camListEl');list.innerHTML='';
+  const mk=(key,name,sub)=>{
+    const b=document.createElement('button');
+    b.className='btn'+(key===camPending?'':' ghost');
+    b.style.cssText='justify-content:flex-start;text-align:left;padding:10px 12px;'
+      +'flex-direction:column;align-items:flex-start;gap:2px';
+    const t=document.createElement('span');t.textContent=name;b.appendChild(t);
+    if(sub){const s=document.createElement('span');s.className='sub';
+      s.style.cssText='margin:0;font-weight:400;text-transform:none;letter-spacing:0';
+      s.textContent=sub;b.appendChild(s);}
+    b.addEventListener('click',()=>{camPending=key;refreshCamSheet();});
+    list.appendChild(b);
+  };
+  for(const p of camList()){
+    const objs=calibratedObjectives(p.key);
+    mk(p.key,p.name,(p.note?p.note+' \u00b7 ':'')
+      +(objs.length?'calibrated at '+objs.map(magLabel).join(', '):'not calibrated'));
+  }
+  mk(null,'New setup\u2026','A camera the app has not seen, or the same camera behind a different adapter');
+  const p=camProfile(camPending);
+  $('camNameIn').value=p?p.name:'';
+  $('camNoteIn').value=p?(p.note||''):'';
+  const objs=camPending?calibratedObjectives(camPending):[];
+  $('camScaleNote').textContent=!camPending
+    ? 'A new setup starts with no scale. Measure a stage micrometer on it once \u2014 the other objectives follow by ratio.'
+    : objs.length
+      ? 'Stored for this setup: '+objs.map(o=>magLabel(o)+' = '+Number(camCalib(camPending)[String(o)].mpp).toFixed(4)
+        +' \u00b5m/px').join(', ')+'. Editing the name above renames the setup and keeps the calibration.'
+      : 'No calibration stored for this setup yet, so its scans get no physical units.';
+}
+$('camDone').addEventListener('click',()=>{
+  const name=$('camNameIn').value.trim(),note=$('camNoteIn').value.trim();
+  if(!name){toast('Give this setup a name.');return;}
+  let key=camPending;
+  if(key&&settings.cameras[key]){
+    settings.cameras[key].name=name;settings.cameras[key].note=note||null;
+  }else{
+    key=newCamKey();
+    settings.cameras[key]={key,name,note:note||null,labels:[],at:Date.now()};
+  }
+  store.set('cameras',settings.cameras);
+  bindCurrentCamera(key);
+  $('camSheet').classList.remove('open');
+  syncObjPill();
+  const a=camAfter;camAfter=null;
+  if(a)a();
+});
+$('camCancel').addEventListener('click',()=>{camAfter=null;$('camSheet').classList.remove('open');});
+$('camPill').addEventListener('click',()=>openCamSheet(null));
 
 /* ---------------- Stage-micrometer calibration ----------------
    Everything here works in NATIVE camera pixels: the canvas is drawn from the
    video at its native resolution, so a distance measured on the canvas is a
    distance on the sensor, independent of how the preview happens to be laid
    out on screen. That is the number the enhancer needs. */
-let calState={frozen:false,a:null,b:null,drag:false,objective:null,scale:1};
+let calState={frozen:false,a:null,b:null,drag:false,objective:null,cam:null,scale:1};
 function calCanvasSetup(){
   const c=$('calCanvas'),vw=video.videoWidth||1920,vh=video.videoHeight||1080;
   c.width=vw;c.height=vh;
@@ -2036,20 +2289,30 @@ function calUpdateResult(){
   }
 }
 function calRenderTable(){
-  const objs=calibratedObjectives();
-  if(!objs.length){$('calTable').textContent='Nothing calibrated yet.';return;}
-  $('calTable').textContent='Calibrated: '+objs.map(o=>{
-    const c=settings.calib[String(o)];
+  const cam=calState.cam||activeCam,cal=camCalib(cam),objs=calibratedObjectives(cam);
+  if(!objs.length){
+    $('calTable').textContent=cam?('Nothing calibrated yet for '+camName(cam)+'.'):'Nothing calibrated yet.';
+    return;
+  }
+  $('calTable').textContent=camName(cam)+' \u2014 calibrated: '+objs.map(o=>{
+    const c=cal[String(o)];
     return magLabel(o)+' = '+Number(c.mpp).toFixed(4)+' \u00b5m/px';
-  }).join('  \u00b7  ')+'. Other objectives are derived from these by magnification ratio.';
+  }).join('  \u00b7  ')+'. Other objectives on this camera are derived from these by magnification ratio; '
+    +'no other camera is derived from them.';
 }
 function openCalSheet(){
-  calState={frozen:false,a:null,b:null,drag:false,objective:settings.objective,frame:null};
+  calState={frozen:false,a:null,b:null,drag:false,objective:settings.objective,cam:activeCam,frame:null};
+  if(!calState.cam){
+    openCamSheet(()=>openCalSheet(),
+      'Which camera are you calibrating? A micrometer measurement belongs to one camera and one adapter, and is never applied to another.');
+    return;
+  }
   if(!calState.objective){
     openObjectiveSheet(()=>openCalSheet(),'Which objective are you calibrating? The stage micrometer measures one objective at a time.');
     return;
   }
   $('calObjLabel').textContent=magLabel(calState.objective);
+  $('calCamLabel').textContent=camName(calState.cam)||'\u2014';
   $('calDist').value='';
   calCanvasSetup();
   calRenderTable();
@@ -2065,6 +2328,10 @@ function openCalSheet(){
 $('calObjChange').addEventListener('click',()=>{
   $('calSheet').classList.remove('open');
   openObjectiveSheet(()=>openCalSheet(),'Which objective are you calibrating?');
+});
+$('calCamChange').addEventListener('click',()=>{
+  $('calSheet').classList.remove('open');
+  openCamSheet(()=>openCalSheet(),'Which camera and adapter are you calibrating?');
 });
 $('calFreeze').addEventListener('click',()=>{
   const c=$('calCanvas'),ctx=c.getContext('2d');
@@ -2099,23 +2366,37 @@ $('calSave').addEventListener('click',()=>{
   if(!(px>4)){toast('Draw a line between two ruling marks first.');return;}
   if(!(dist>0)){toast('Enter how far apart those two points are.');return;}
   const mpp=dist/px;
-  settings.calib[String(calState.objective)]={mpp,um:dist,px:+px.toFixed(2),
+  const ck=calState.cam||activeCam;
+  if(!ck){toast('Name this camera first \u2014 a calibration has to belong to one.');return;}
+  if(!settings.calib[ck])settings.calib[ck]={};
+  settings.calib[ck][String(calState.objective)]={mpp,um:dist,px:+px.toFixed(2),
     at:Date.now(),sensor:$('calCanvas').width+'x'+$('calCanvas').height,
-    zoom:currentZoom()||null,device:currentDeviceLabel()};
+    zoom:currentZoom()||null,device:currentDeviceLabel(),cam:ck,camName:camName(ck)};
   store.set('calib',settings.calib);
   $('calSheet').classList.remove('open');
   syncObjPill();syncSettingsUI();
-  toast(magLabel(calState.objective)+' calibrated: '+mpp.toFixed(4)+' \u00b5m/px');
+  toast(magLabel(calState.objective)+' on '+camName(ck)+' calibrated: '+mpp.toFixed(4)+' \u00b5m/px');
 });
 $('setCalBtn').addEventListener('click',()=>{$('settingsSheet').classList.remove('open');openCalSheet();});
+$('setCamBtn').addEventListener('click',()=>{
+  $('settingsSheet').classList.remove('open');
+  openCamSheet(()=>{syncSettingsUI();$('settingsSheet').classList.add('open');});
+});
 
 /* ---------------- Settings ---------------- */
 function syncSettingsUI(){
-  const objs=calibratedObjectives();
-  $('setCalStatus').textContent=objs.length
-    ? 'Calibrated from a stage micrometer: '+objs.map(o=>magLabel(o)+' = '+Number(settings.calib[String(o)].mpp).toFixed(4)+' \u00b5m/px').join(', ')
-      +'. Other objectives are derived from these by magnification ratio.'
-    : 'No scale calibration yet \u2014 slides will be saved without physical units.';
+  const cam=activeCam,cal=camCalib(cam),objs=calibratedObjectives(cam),prof=camProfile(cam);
+  $('setCamProfile').textContent=cam
+    ? 'This camera is \u201c'+prof.name+'\u201d'+(prof.note?' \u2014 '+prof.note:'')+'. Its scale is stored separately '
+      +'from your other cameras.'
+    : 'This camera has no profile yet, so its scans get no \u00b5m/pixel. Name it to keep its scale separate.';
+  $('setCalStatus').textContent=!cam
+    ? 'Scale is stored per camera. Name this camera first, then calibrate it.'
+    : objs.length
+      ? camName(cam)+' \u2014 calibrated from a stage micrometer: '
+        +objs.map(o=>magLabel(o)+' = '+Number(cal[String(o)].mpp).toFixed(4)+' \u00b5m/px').join(', ')
+        +'. Other objectives on this camera are derived from these by magnification ratio.'
+      : 'No scale calibration for '+camName(cam)+' yet \u2014 its slides will be saved without physical units.';
   $('setMag').value=settings.mag||'';
   $('setQuality').value=String(settings.quality);
   $('setMaxCanvas').value=String(settings.maxCanvas);
