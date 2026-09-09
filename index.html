@@ -203,6 +203,7 @@
       <div class="hudcol">
         <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">ready</span></span>
         <span class="pill" id="dimPill" style="display:none"><span id="dimText"></span></span>
+        <span class="pill" id="reducedPill" style="display:none"><span id="reducedText"></span></span>
         <span class="pill" id="zoomPill" style="display:none;gap:9px">
           <span id="zoomText">1.0×</span>
           <input type="range" id="zoomSlider" min="1" max="1" step="0.1" value="1"
@@ -1224,8 +1225,30 @@ function rescaleComposite(f){
   comp.ox*=f;comp.oy*=f;comp.minX*=f;comp.minY*=f;comp.maxX*=f;comp.maxY*=f;
   comp.lastPasteX*=f;comp.lastPasteY*=f;comp.zoom*=f;
   tileMap.clear();
+  // A one-off toast was the wrong shape for this. It disappears, the mosaic then
+  // looks frozen, and that reads as "capture has stopped" — which cost real
+  // coverage when sweeps were cut short on that belief. The condition persists,
+  // so the indicator must persist too, and must say what is still true: the
+  // recorded video is unaffected, and the enhancer rebuilds from that, never
+  // from this preview.
+  showReduced();
   if(!comp.zoomNoted){comp.zoomNoted=true;
-    toast('Slide is larger than the max canvas — continuing at reduced resolution.');}
+    toast('Slide is bigger than the preview canvas — the on-screen mosaic shrinks from here. '
+         +'Recording continues at full quality; keep sweeping.');}
+}
+/* Stays up for the rest of a capture once the preview has been scaled down. */
+function showReduced(){
+  const p=$('reducedPill');
+  if(!p||!capturing||!comp||comp.zoom>=0.9)return;
+  p.style.display='';
+  p.className='pill warn';
+  $('reducedText').textContent='preview '+(comp.zoom<0.1
+      ? '1/'+Math.round(1/comp.zoom)
+      : Math.round(comp.zoom*100)+'%')+' — still recording, keep sweeping';
+}
+function hideReduced(){
+  const p=$('reducedPill');
+  if(p)p.style.display='none';
 }
 /* Sharper-frame-wins pasting: a coarse per-tile sharpness map lets a later,
    crisper pass overwrite an earlier blurry one instead of averaging into mush.
@@ -1412,6 +1435,7 @@ function startCapture(){
         lastPasteX:-1e9,lastPasteY:-1e9,frames:0,startT:Date.now()};
   capturing=true;
   frameErrors=0;
+  hideReduced();
   // A calibration made at a different camera zoom no longer applies.
   (function(){
     const c=calibEntry(settings.objective,activeCam),z=currentZoom();
@@ -1430,6 +1454,7 @@ async function finishCapture(){
   $('recBtn').classList.remove('rec');
   $('minimapWrap').style.display='none';
   $('dimPill').style.display='none';
+  hideReduced();
   const recorded=await stopVideoRecording();
   if(comp.frames<2){setStatus('ok','ready');toast('Not enough movement captured — nothing to save.');return;}
   const w=Math.round(comp.maxX-comp.minX),h=Math.round(comp.maxY-comp.minY);
