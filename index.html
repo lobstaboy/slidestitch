@@ -323,6 +323,28 @@
   </div>
 </div>
 
+<!-- ============ WHITE BALANCE SHEET ============ -->
+<div class="sheet" id="wbSheet" role="dialog" aria-label="Set white balance">
+  <div class="panel">
+    <h2>Set white balance</h2>
+    <div class="sub">Move to a blank part of the slide — glass only, no tissue in view — and hold steady.
+      What the camera calls white there is the reference; everything else is measured against it.
+      Stored per camera, so it is once per setup.</div>
+    <div style="margin:12px 0 6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="sub" style="margin:0">Camera:</span>
+      <strong id="wbCamLabel">—</strong>
+    </div>
+    <div style="background:#0d0c10;border:1px solid var(--line);border-radius:10px;overflow:hidden">
+      <canvas id="wbCanvas" style="display:block;width:100%"></canvas>
+    </div>
+    <p class="sub" id="wbReading" style="margin-top:10px">Point at empty glass, then measure.</p>
+    <div class="actions">
+      <button class="btn ghost" id="wbSkip">Skip for now</button>
+      <button class="btn" id="wbMeasure">Measure</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ SCALE CALIBRATION SHEET ============ -->
 <div class="sheet" id="calSheet" role="dialog" aria-label="Calibrate scale">
   <div class="panel">
@@ -376,6 +398,7 @@
     <button class="btn ghost" id="setCamBtn" style="width:100%;justify-content:center;margin-top:6px">Name this camera / change adapter…</button>
     <label>Scale</label>
     <button class="btn ghost" id="setCalBtn" style="width:100%;justify-content:center">Calibrate scale with a stage micrometer…</button>
+    <button class="btn ghost" id="setWbBtn" style="width:100%;justify-content:center;margin-top:6px">Set white balance on blank glass…</button>
     <p class="sub" id="setCalStatus" style="margin-top:8px"></p>
     <label for="setMag" style="margin-top:12px">Default magnification</label>
     <input id="setMag" placeholder="e.g. 10x">
@@ -791,6 +814,23 @@ function bindCurrentCamera(key){
   const p=camProfile(key),lbl=usingFileSource?null:currentDeviceLabel();
   if(p&&lbl&&(p.labels||[]).indexOf(lbl)<0){p.labels=(p.labels||[]).concat([lbl]);store.set('cameras',settings.cameras);}
   setActiveCam(key);
+}
+/* The white point this camera reports on empty glass. Cheap microscope CMOS
+   sensors are not neutral — measured across the 2026-09-08 set, the HAYEAR and
+   AmScope sit 6-12 levels green where the iPhone sits within 2 — and that is a
+   constant of the camera, not of the image. So it is measured once against a
+   known reference and stored on the profile, never inferred from picture
+   content. Inferring it from content is exactly what produced the magenta
+   backgrounds. */
+function camWB(key){
+  const p=camProfile(key);
+  const w=p&&p.wb;
+  return (w&&w.r>0&&w.g>0&&w.b>0)?w:null;
+}
+function wbGains(w){
+  if(!w)return null;
+  const m=(w.r+w.g+w.b)/3;
+  return {r:m/w.r, g:m/w.g, b:m/w.b};
 }
 function camList(){
   return Object.keys(settings.cameras).map(k=>settings.cameras[k])
@@ -1420,6 +1460,14 @@ function startCapture(){
       'Before this scan: which objective is in place? This is what turns the finished slide into real microns.');
     return;
   }
+  // Once per camera: read the white point off blank glass. Doing it here also
+  // means the camera's own auto white balance is settling on GLASS rather than
+  // on tissue at the moment lockCameraForSweep() freezes it.
+  if(activeCam&&!camWB(activeCam)){
+    openWbSheet(()=>startCapture(),
+      'Before your first scan on '+camName(activeCam)+': move to a blank area of the slide and measure the white point. Once only \u2014 it is remembered for this camera.');
+    return;
+  }
   const cap=Number(settings.quality)||1024;
   buildFrameCanvases(cap);
   compCanvas=document.createElement('canvas');
@@ -1690,6 +1738,7 @@ $('saveBtn').addEventListener('click',async()=>{
       mppNative:natMpp||null,            // um/px of the raw camera frame (the enhancer uses this)
       mppSource:natMpp?(mppIsDerived(saveObjective,camKey)?'derived-from-other-objective':'stage-micrometer'):null,
       camera:camKey?{key:camKey,name:pendingResult.camName||null,note:pendingResult.camNote||null}:null,
+      whiteBalance:camWB(camKey)||null,   // the enhancer neutralises against this
       calib:natMpp?JSON.parse(JSON.stringify(camCalib(camKey))):null,
       nativeSquarePx:pendingResult.nativeSquarePx||null,
       captureW:pendingResult.captureW||null,captureH:pendingResult.captureH||null,
@@ -2221,7 +2270,8 @@ function refreshCamSheet(){
   for(const p of camList()){
     const objs=calibratedObjectives(p.key);
     mk(p.key,p.name,(p.note?p.note+' \u00b7 ':'')
-      +(objs.length?'calibrated at '+objs.map(magLabel).join(', '):'not calibrated'));
+      +(objs.length?'calibrated at '+objs.map(magLabel).join(', '):'not calibrated')
+      +(camWB(p.key)?' \u00b7 white balanced':' \u00b7 no white balance'));
   }
   mk(null,'New setup\u2026','A camera the app has not seen, or the same camera behind a different adapter');
   const p=camProfile(camPending);
@@ -2254,6 +2304,95 @@ $('camDone').addEventListener('click',()=>{
 });
 $('camCancel').addEventListener('click',()=>{camAfter=null;$('camSheet').classList.remove('open');});
 $('camPill').addEventListener('click',()=>openCamSheet(null));
+
+/* ---------------- White balance ----------------
+   Read from the live view on empty glass: the mean of the brightest half of the
+   central field. If the frame is too dark, or still has tissue in it, say so
+   rather than storing a bad reference — a wrong white point is worse than none,
+   because it looks like a measurement. */
+let wbAfter=null;
+function openWbSheet(after,reason){
+  wbAfter=after||null;
+  if(!activeCam){
+    openCamSheet(()=>openWbSheet(after,reason),
+      'Which camera is this? White balance is stored per camera and adapter.');
+    return;
+  }
+  $('wbCamLabel').textContent=camName(activeCam)||'\u2014';
+  const w=camWB(activeCam);
+  $('wbReading').textContent=reason||(w
+    ? 'Already set for this camera: white is R'+Math.round(w.r)+' G'+Math.round(w.g)+' B'+Math.round(w.b)
+      +'. Measure again to replace it.'
+    : 'Point at empty glass, then measure.');
+  const c=$('wbCanvas');
+  c.width=320;c.height=Math.round(320*(video.videoHeight||1080)/(video.videoWidth||1920));
+  $('wbSheet').classList.add('open');
+  const loop=()=>{
+    if(!$('wbSheet').classList.contains('open'))return;
+    try{c.getContext('2d').drawImage(video,0,0,c.width,c.height);}catch(e){}
+    requestAnimationFrame(loop);
+  };
+  loop();
+}
+function readWhite(){
+  const c=$('wbCanvas'),ctx=c.getContext('2d');
+  try{ctx.drawImage(video,0,0,c.width,c.height);}catch(e){return null;}
+  let d;
+  try{d=ctx.getImageData(0,0,c.width,c.height).data;}catch(e){return null;}
+  const cx=c.width/2, cy=c.height/2, rad=Math.min(c.width,c.height)*0.35;
+  const px=[];
+  for(let y=0;y<c.height;y+=2)for(let x=0;x<c.width;x+=2){
+    const dx=x-cx,dy=y-cy;
+    if(dx*dx+dy*dy>rad*rad)continue;
+    const i=(y*c.width+x)*4;
+    px.push([0.299*d[i]+0.587*d[i+1]+0.114*d[i+2], d[i], d[i+1], d[i+2]]);
+  }
+  if(px.length<50)return null;
+  px.sort((a,b)=>b[0]-a[0]);
+  const keep=px.slice(0, Math.max(20, (px.length*0.5)|0));
+  let r=0,g=0,b=0,sat=0;
+  for(const q of keep){
+    r+=q[1];g+=q[2];b+=q[3];
+    const mx=Math.max(q[1],q[2],q[3]),mn=Math.min(q[1],q[2],q[3]);
+    sat+=mx>0?(mx-mn)/mx:0;
+  }
+  const n=keep.length;
+  return {r:r/n,g:g/n,b:b/n,lum:(r+g+b)/(3*n),sat:sat/n};
+}
+$('wbMeasure').addEventListener('click',()=>{
+  const w=readWhite();
+  if(!w){toast('No usable view \u2014 is the camera running?');return;}
+  if(w.lum<90){
+    $('wbReading').textContent='Too dark to call white (level '+Math.round(w.lum)
+      +'). Find a brighter empty area, or turn the illumination up.';
+    return;
+  }
+  if(w.sat>0.18){
+    $('wbReading').textContent='There is still colour in the field (saturation '+w.sat.toFixed(2)
+      +') \u2014 that is tissue, not glass. Move to a blank area and measure again.';
+    return;
+  }
+  const p=camProfile(activeCam);
+  p.wb={r:+w.r.toFixed(1),g:+w.g.toFixed(1),b:+w.b.toFixed(1),at:Date.now(),zoom:currentZoom()||null};
+  store.set('cameras',settings.cameras);
+  const gn=wbGains(p.wb);
+  $('wbReading').textContent='White is R'+Math.round(w.r)+' G'+Math.round(w.g)+' B'+Math.round(w.b)
+    +' \u2192 correction R\u00d7'+gn.r.toFixed(3)+' G\u00d7'+gn.g.toFixed(3)+' B\u00d7'+gn.b.toFixed(3)
+    +'. Saved for '+camName(activeCam)+'.';
+  toast('White balance set for '+camName(activeCam)+'.');
+  setTimeout(()=>{
+    $('wbSheet').classList.remove('open');
+    const a=wbAfter;wbAfter=null;
+    if(a)a();
+  },900);
+});
+$('wbSkip').addEventListener('click',()=>{
+  // Skipping is allowed on purpose: no white point simply means no correction,
+  // which is the honest state. It is never guessed from the picture.
+  $('wbSheet').classList.remove('open');
+  const a=wbAfter;wbAfter=null;
+  if(a)a();
+});
 
 /* ---------------- Stage-micrometer calibration ----------------
    Everything here works in NATIVE camera pixels: the canvas is drawn from the
@@ -2403,6 +2542,10 @@ $('calSave').addEventListener('click',()=>{
   toast(magLabel(calState.objective)+' on '+camName(ck)+' calibrated: '+mpp.toFixed(4)+' \u00b5m/px');
 });
 $('setCalBtn').addEventListener('click',()=>{$('settingsSheet').classList.remove('open');openCalSheet();});
+$('setWbBtn').addEventListener('click',()=>{
+  $('settingsSheet').classList.remove('open');
+  openWbSheet(()=>{syncSettingsUI();$('settingsSheet').classList.add('open');});
+});
 $('setCamBtn').addEventListener('click',()=>{
   $('settingsSheet').classList.remove('open');
   openCamSheet(()=>{syncSettingsUI();$('settingsSheet').classList.add('open');});
