@@ -1589,6 +1589,29 @@ async function startCamera(deviceId){
       try{mediaStream=await navigator.mediaDevices.getUserMedia(mkConstraints(base));break;}
       catch(err){lastErr=err;mediaStream=null;}
     }
+    // The remembered camera can simply be gone — unplugged, a different browser
+    // profile, permissions cleared — and deviceId:{exact:...} then fails every
+    // rung with OverconstrainedError. That used to surface as "this in-app
+    // viewer is blocking the camera", which sent people to a different browser
+    // for a problem no browser change could fix. Let the pin go and take
+    // whatever camera is actually present.
+    if(!mediaStream){
+      const wasPinned=!!deviceId;
+      if(wasPinned){settings.cameraId=null;store.set('cameraId',null);}
+      for(const base of ladder){
+        try{mediaStream=await navigator.mediaDevices.getUserMedia(
+              {video:{...base,frameRate:{ideal:30}}});break;}
+        catch(err){lastErr=err;mediaStream=null;}
+      }
+      if(!mediaStream){
+        // last resort: no resolution ladder, no frame rate, no device — if the
+        // machine has any camera at all this succeeds.
+        try{mediaStream=await navigator.mediaDevices.getUserMedia({video:true});}
+        catch(err){lastErr=err;mediaStream=null;}
+      }
+      if(mediaStream&&wasPinned)
+        toast('The camera this app had selected is gone — using the one that is here.');
+    }
     if(!mediaStream)throw lastErr||new Error('no camera');
     clearTimeout(hangTimer);
     video.srcObject=mediaStream;
@@ -1614,6 +1637,12 @@ async function startCamera(deviceId){
       showSafariHint();
     }else if(e.name==='NotFoundError'){
       $('camErr').textContent='No camera was found on this device.';
+    }else if(e.name==='OverconstrainedError'){
+      // Say what actually failed. This is not a browser problem, so do not
+      // offer the Safari hint for it.
+      $('camErr').textContent='No camera could meet the requested settings'
+        +(e.constraint?' (constraint: '+e.constraint+')':'')+'. '
+        +'If a scope camera was unplugged, reconnect it — or pick a different one in Settings.';
     }else{
       $('camErr').textContent='Could not start camera: '+(e.message||e.name)+'.';
       showSafariHint();
