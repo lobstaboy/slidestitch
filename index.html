@@ -268,7 +268,10 @@
     <div class="metaline" id="saveMeta"></div>
     <label for="saveName">Slide name</label>
     <input id="saveName" autocomplete="off">
-    <label>Objective</label>
+    <label id="saveCamLabel">Shot on</label>
+    <select id="saveCam" style="margin-bottom:4px"></select>
+    <p class="sub" id="saveCamNote" style="margin:0 0 10px"></p>
+    <label id="saveObjLabel">Objective</label>
     <div id="saveObjGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px"></div>
     <div class="row2">
       <div><label for="saveMpp">Microns / pixel</label><input id="saveMpp" type="number" step="0.0001" min="0"></div>
@@ -1463,7 +1466,7 @@ function startCapture(){
   // Once per camera: read the white point off blank glass. Doing it here also
   // means the camera's own auto white balance is settling on GLASS rather than
   // on tissue at the moment lockCameraForSweep() freezes it.
-  if(activeCam&&!camWB(activeCam)){
+  if(activeCam&&!camWB(activeCam)&&!wbSkipped.has(activeCam)){
     openWbSheet(()=>startCapture(),
       'Before your first scan on '+camName(activeCam)+': move to a blank area of the slide and measure the white point. Once only \u2014 it is remembered for this camera.');
     return;
@@ -1709,11 +1712,13 @@ function defaultName(){
   const d=new Date();
   return 'Slide '+d.toISOString().slice(0,10)+' '+d.toTimeString().slice(0,5);
 }
-let saveObjective=null;
+let saveObjective=null,saveCam=null;
 function refreshSaveScale(){
   const r=pendingResult||{};
-  // The scale of the camera this scan was made on, not whatever is plugged in now.
-  const ck=r.camKey||null;
+  // The scale of the camera this scan was made on — correctable here, because
+  // the app can be wrong about it (a camera reconnected mid-session, a profile
+  // picked in haste) and the scale is only as good as this attribution.
+  const ck=saveCam||null;
   const nat=nativeMppFor(saveObjective,ck);
   const comp=compositeMpp(nat,r.nativeSquarePx,r.cap,r.compZoom);
   $('saveMag').value=magLabel(saveObjective);
@@ -1727,10 +1732,17 @@ function refreshSaveScale(){
        :'No calibration for '+magLabel(saveObjective)+' on '+(r.camName||'this camera')
         +' \u2014 saved without physical units. Settings \u2192 Calibrate scale.');
   buildObjGrid($('saveObjGrid'),saveObjective,o=>{saveObjective=o;refreshSaveScale();});
+  // This grid is here to CORRECT a wrong objective after the fact, not to ask
+  // again for one already given. Say so, or it reads as the app forgetting.
+  $('saveObjLabel').textContent=saveObjective
+    ? 'Objective \u2014 set to '+magLabel(saveObjective)+', change only if that is wrong'
+    : 'Objective';
 }
 function openSaveSheet(){
   $('saveName').value=defaultName();
   saveObjective=settings.objective;
+  saveCam=(pendingResult&&pendingResult.camKey)||null;
+  buildSaveCamSelect();
   $('saveMpp').value=settings.mpp??'';
   $('saveMag').value=settings.mag||'';
   refreshSaveScale();
@@ -1754,7 +1766,7 @@ $('saveBtn').addEventListener('click',async()=>{
     tc.getContext('2d').drawImage(pendingResult.canvas,0,0,tw,th);
     const thumb=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.8));
     const mpp=parseFloat($('saveMpp').value)||null;
-    const camKey=pendingResult.camKey||null;
+    const camKey=saveCam||null;
     const natMpp=nativeMppFor(saveObjective,camKey);
     const rec={
       id:'s'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
@@ -1766,7 +1778,7 @@ $('saveBtn').addEventListener('click',async()=>{
       objective:saveObjective||null,
       mppNative:natMpp||null,            // um/px of the raw camera frame (the enhancer uses this)
       mppSource:natMpp?(mppIsDerived(saveObjective,camKey)?'derived-from-other-objective':'stage-micrometer'):null,
-      camera:camKey?{key:camKey,name:pendingResult.camName||null,note:pendingResult.camNote||null}:null,
+      camera:camKey?{key:camKey,name:camName(camKey),note:(camProfile(camKey)||{}).note||null}:null,
       whiteBalance:camWB(camKey)||null,   // the enhancer neutralises against this
       calib:natMpp?JSON.parse(JSON.stringify(camCalib(camKey))):null,
       nativeSquarePx:pendingResult.nativeSquarePx||null,
@@ -2140,6 +2152,24 @@ function refreshEditScale(){
 /* Slides recorded before camera profiles existed, or shot on a camera whose
    profile was renamed, can be attributed here. Nothing else assigns a camera
    to a slide after the fact. */
+function buildSaveCamSelect(){
+  const sel=$('saveCam');sel.innerHTML='';
+  const none=document.createElement('option');
+  none.value='';none.textContent='\u2014 not recorded \u2014';sel.appendChild(none);
+  for(const p of camList()){
+    const o=document.createElement('option');o.value=p.key;o.textContent=p.name;sel.appendChild(o);
+  }
+  sel.value=saveCam||'';
+  const p=camProfile(saveCam);
+  $('saveCamLabel').textContent=saveCam
+    ? 'Shot on \u2014 recorded as '+camName(saveCam)+', change only if that is wrong'
+    : 'Shot on';
+  $('saveCamNote').textContent=p&&p.note?p.note:(saveCam?'':'Without a camera this slide is saved without physical units.');
+}
+$('saveCam').addEventListener('change',e=>{
+  saveCam=e.target.value||null;
+  buildSaveCamSelect();refreshSaveScale();
+});
 function buildEditCamSelect(){
   const sel=$('editCam');sel.innerHTML='';
   const none=document.createElement('option');
@@ -2340,6 +2370,11 @@ $('camPill').addEventListener('click',()=>openCamSheet(null));
    rather than storing a bad reference — a wrong white point is worse than none,
    because it looks like a measurement. */
 let wbAfter=null;
+/* Cameras the user has skipped white balance for in this session. Without this
+   the skip button re-entered startCapture(), the gate saw no white point and
+   reopened the same sheet — an unskippable prompt that read as the app not
+   registering the answer. Skipping is a real answer and has to stick. */
+const wbSkipped=new Set();
 function openWbSheet(after,reason){
   wbAfter=after||null;
   if(!activeCam){
@@ -2418,6 +2453,7 @@ $('wbMeasure').addEventListener('click',()=>{
 $('wbSkip').addEventListener('click',()=>{
   // Skipping is allowed on purpose: no white point simply means no correction,
   // which is the honest state. It is never guessed from the picture.
+  if(activeCam)wbSkipped.add(activeCam);
   $('wbSheet').classList.remove('open');
   const a=wbAfter;wbAfter=null;
   if(a)a();
