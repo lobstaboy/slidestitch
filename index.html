@@ -303,8 +303,10 @@
     <input id="camNameIn" placeholder="e.g. HAYEAR — eyepiece adapter">
     <label for="camNoteIn" style="margin-top:10px">Optical path (optional)</label>
     <input id="camNoteIn" placeholder="e.g. 10× eyepiece adapter, no reducer">
+    <p class="sub" id="camWarn" style="margin-top:10px;display:none"></p>
     <p class="sub" id="camScaleNote" style="margin-top:10px"></p>
     <div class="actions">
+      <button class="btn ghost" id="camDelete" style="display:none">Remove setup</button>
       <button class="btn ghost" id="camCancel">Cancel</button>
       <button class="btn" id="camDone">Use this camera</button>
     </div>
@@ -834,6 +836,21 @@ function wbGains(w){
   if(!w)return null;
   const m=(w.r+w.g+w.b)/3;
   return {r:m/w.r, g:m/w.g, b:m/w.b};
+}
+/* Removing a setup takes its calibrations and bindings with it. Nothing else
+   references them, and leaving orphaned measurements around is how a number
+   ends up applied to a camera that never produced it. */
+function deleteCam(key){
+  if(!key||!settings.cameras[key])return;
+  delete settings.cameras[key];
+  delete settings.calib[key];
+  for(const dk of Object.keys(settings.camBind))
+    if(settings.camBind[dk]===key)delete settings.camBind[dk];
+  store.set('cameras',settings.cameras);
+  store.set('calib',settings.calib);
+  store.set('camBind',settings.camBind);
+  if(typeof wbSkipped!=='undefined')wbSkipped.delete(key);
+  if(activeCam===key)setActiveCam(null);
 }
 function camList(){
   return Object.keys(settings.cameras).map(k=>settings.cameras[k])
@@ -2299,7 +2316,7 @@ function syncObjPill(){
    unidentified one, and any time from the HUD pill. Naming a setup is the only
    way a micrometer measurement gets attached to something, so this is the gate
    in front of every path that reads or writes a scale. */
-let camPending=null,camAfter=null;
+let camPending=null,camAfter=null,camMismatch=false,camConfirm=false,camDelConfirm=false;
 function openCamSheet(after,reason){
   camAfter=after||null;
   camPending=activeCam;
@@ -2336,6 +2353,32 @@ function refreshCamSheet(){
   const p=camProfile(camPending);
   $('camNameIn').value=p?p.name:'';
   $('camNoteIn').value=p?(p.note||''):'';
+  /* The app knows every device label a setup has ever been used with, so a
+     brand-new label is a fact it can check rather than a guess. This is the one
+     mistake that silently poisons everything downstream: bind the wrong camera
+     here and its microns get stored under another camera's name. */
+  const liveLabel=usingFileSource?null:currentDeviceLabel();
+  const prof=camProfile(camPending);
+  const known=(prof&&prof.labels)||[];
+  const mismatch=!!(prof&&liveLabel&&known.length&&known.indexOf(liveLabel)<0);
+  const warn=$('camWarn');
+  if(mismatch){
+    warn.style.display='';
+    warn.style.color='var(--warn)';
+    warn.textContent='This setup has only ever been used with '
+      +known.map(l=>'\u201c'+l+'\u201d').join(' or ')
+      +', but the browser is reporting \u201c'+liveLabel+'\u201d. If that is not the same camera, '
+      +'pick the right one in Settings first \u2014 binding the wrong one here would store its scale '
+      +'under this name.';
+  }else{
+    warn.style.display='none';
+  }
+  camMismatch=mismatch; camConfirm=false;
+  $('camDone').textContent=mismatch?'Use anyway':'Use this camera';
+  const del=$('camDelete');
+  del.style.display=prof?'':'none';
+  del.textContent='Remove setup';
+  camDelConfirm=false;
   const objs=camPending?calibratedObjectives(camPending):[];
   $('camScaleNote').textContent=!camPending
     ? 'A new setup starts with no scale. Measure a stage micrometer on it once \u2014 the other objectives follow by ratio.'
@@ -2345,6 +2388,11 @@ function refreshCamSheet(){
       : 'No calibration stored for this setup yet, so its scans get no physical units.';
 }
 $('camDone').addEventListener('click',()=>{
+  if(camMismatch&&!camConfirm){
+    camConfirm=true;
+    $('camDone').textContent='Yes, it really is this camera';
+    return;                       // one deliberate second tap, not a silent accept
+  }
   const name=$('camNameIn').value.trim(),note=$('camNoteIn').value.trim();
   if(!name){toast('Give this setup a name.');return;}
   let key=camPending;
@@ -2360,6 +2408,24 @@ $('camDone').addEventListener('click',()=>{
   syncObjPill();
   const a=camAfter;camAfter=null;
   if(a)a();
+});
+$('camDelete').addEventListener('click',()=>{
+  const p=camProfile(camPending);
+  if(!p)return;
+  const objs=calibratedObjectives(camPending);
+  if(!camDelConfirm){
+    camDelConfirm=true;
+    $('camDelete').textContent=objs.length
+      ? 'Delete '+p.name+' and its '+objs.length+' calibration'+(objs.length>1?'s':'')+'?'
+      : 'Delete '+p.name+'?';
+    return;
+  }
+  const gone=p.name;
+  deleteCam(camPending);
+  camPending=null;
+  refreshCamSheet();
+  syncObjPill();
+  toast('Removed '+gone+'.');
 });
 $('camCancel').addEventListener('click',()=>{camAfter=null;$('camSheet').classList.remove('open');});
 $('camPill').addEventListener('click',()=>openCamSheet(null));
