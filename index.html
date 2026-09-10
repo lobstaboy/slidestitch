@@ -30,6 +30,7 @@
     --sans:'Instrument Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
     --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
     --safe-b:env(safe-area-inset-bottom,0px);
+    --safe-t:env(safe-area-inset-top,0px);
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
@@ -61,7 +62,7 @@
   #stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
   #video{max-width:100%;max-height:100%;object-fit:contain}
   #camMsg{position:absolute;inset:0;display:flex;flex-direction:column;gap:14px;align-items:center;
-    justify-content:center;text-align:center;padding:32px;background:var(--ground)}
+    justify-content:center;text-align:center;padding:calc(32px + var(--safe-t)) 32px 32px;background:var(--ground)}
   #camMsg p{color:var(--muted);max-width:34ch}
   #camMsg h2{font-size:19px}
   .btn{display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#17131f;
@@ -80,7 +81,7 @@
   @media (prefers-reduced-motion:reduce){#trackRing.crit{animation:none}}
 
   /* HUD */
-  #hud{position:absolute;top:0;left:0;right:0;padding:12px 14px;display:flex;align-items:flex-start;
+  #hud{position:absolute;top:0;left:0;right:0;padding:calc(12px + var(--safe-t)) 14px 12px;display:flex;align-items:flex-start;
     justify-content:space-between;gap:10px;pointer-events:none;z-index:5}
   .hudcol{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
   .hudcol.right{align-items:flex-end}
@@ -130,7 +131,7 @@
 
   /* ---------- library ---------- */
   #library{background:var(--ground)}
-  #libHead{padding:16px 16px 10px;display:flex;flex-direction:column;gap:12px;border-bottom:1px solid var(--line-soft)}
+  #libHead{padding:calc(16px + var(--safe-t)) 16px 10px;display:flex;flex-direction:column;gap:12px;border-bottom:1px solid var(--line-soft)}
   #libHead .toprow{display:flex;align-items:baseline;justify-content:space-between}
   #libHead h1{font-size:20px;letter-spacing:-.01em}
   #storageNote{font-family:var(--mono);font-size:11px;color:var(--faint)}
@@ -150,8 +151,8 @@
   /* ---------- slide detail viewer ---------- */
   #detail{position:fixed;inset:0;background:var(--ground);z-index:30;display:none;flex-direction:column}
   #detail.open{display:flex}
-  #detailBar{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line-soft);
-    background:var(--surface)}
+  #detailBar{display:flex;align-items:center;gap:10px;padding:calc(10px + var(--safe-t)) 12px 10px;
+    border-bottom:1px solid var(--line-soft);background:var(--surface)}
   #detailBar .name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .iconbtn{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;
     border:1px solid var(--line);background:var(--raised)}
@@ -1933,10 +1934,15 @@ let detailSlide=null, detailBitmap=null;
 const vState={x:0,y:0,scale:1};
 const vc=$('viewerCanvas'),vwrap=$('viewerWrap');
 
+let detailHist=false;
 async function openDetail(id){
   detailSlide=await dbGet(id);
   if(!detailSlide)return;
+  const wasOpen=$('detail').classList.contains('open');
   $('detail').classList.add('open');
+  if(!wasOpen&&!detailHist){
+    try{history.pushState({ss:'detail'},'');detailHist=true;}catch(e){}
+  }
   $('detailName').textContent=detailSlide.name;
   renderMeta();
   try{detailBitmap=await createImageBitmap(detailSlide.image);}
@@ -1949,11 +1955,18 @@ async function openDetail(id){
   drawViewer();
 }
 function closeDetail(){
+  const popNeeded=detailHist;detailHist=false;
   $('detail').classList.remove('open');
   if(detailBitmap&&detailBitmap.close)detailBitmap.close();
   detailBitmap=null;detailSlide=null;
+  if(popNeeded){try{history.back();}catch(e){}}
 }
 $('detailBack').addEventListener('click',closeDetail);
+/* Swipe-back (or any pop) closes the slide rather than the app. Clearing the
+   flag first stops closeDetail popping a second time. */
+window.addEventListener('popstate',()=>{
+  if($('detail').classList.contains('open')){detailHist=false;closeDetail();}
+});
 function renderMeta(){
   const s=detailSlide,g=$('metaGrid');g.innerHTML='';
   const phys=physSize(s.widthPx,s.heightPx,s.mpp);

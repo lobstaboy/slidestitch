@@ -2,7 +2,7 @@
    instantly and works offline (the microscope room rarely has good signal).
    Strategy: network-first for the HTML (so an updated version is picked up on
    the next launch), cache-first for the static assets. Bump VERSION on release. */
-const VERSION = 'slidestitch-v12-2026-09-10';
+const VERSION = 'slidestitch-v13-2026-09-10';
 const SHELL = ['./', './index.html', './manifest.webmanifest',
                './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
