@@ -1248,7 +1248,7 @@ function grabGray(){
 function ensureCompCapacity(px,py,capz){
   // Grow the composite when pasting near an edge; at the size ceiling,
   // zoom the whole composite out instead of ever clipping tissue.
-  for(let guard=0;guard<5;guard++){
+  for(let guard=0;guard<6;guard++){
     const margin=Math.ceil(capz*0.3);
     const needL=px<margin,needT=py<margin,
         needR=px+capz>compCanvas.width-margin,needB=py+capz>compCanvas.height-margin;
@@ -1260,8 +1260,23 @@ function ensureCompCapacity(px,py,capz){
       regrow(nw,nh,needL?GROW:0,needT?GROW:0);
       px+=needL?GROW:0;py+=needT?GROW:0;
     }else{
-      rescaleComposite(0.75);
-      px*=0.75;py*=0.75;capz*=0.75;
+      // At the size ceiling. A plain shrink used to be the answer here and it is
+      // WRONG on the left/top edge: rescaleComposite scaled px and capz by the
+      // same factor, so `px<margin` — the thing that triggered the rescale — is
+      // scale-invariant and stayed true. The loop then burned every guard
+      // iteration, 0.75 each, on one frame. That is the collapse: 0.75^10=0.056
+      // and 0.75^15=0.013 are exactly the compZoom values seen in the six bad
+      // captures, and the multiples of five are the guard running out.
+      // Re-fit instead: centre what is painted inside the canvas, and shrink
+      // only by as much as centring alone cannot cover.
+      const bx0=Math.min(comp.minX,px),bx1=Math.max(comp.maxX,px+capz);
+      const by0=Math.min(comp.minY,py),by1=Math.max(comp.maxY,py+capz);
+      const bw=Math.max(1,bx1-bx0),bh=Math.max(1,by1-by0);
+      let f=Math.min(1,(compCanvas.width-2*margin)/bw,(compCanvas.height-2*margin)/bh);
+      if(f<0.75)f=0.75;                       // never more than one step at a time
+      const tx=(compCanvas.width-bw*f)/2-bx0*f,ty=(compCanvas.height-bh*f)/2-by0*f;
+      rescaleComposite(f,tx,ty);
+      px=px*f+tx;py=py*f+ty;capz*=f;
     }
   }
   return true;
@@ -1277,13 +1292,23 @@ function regrow(nw,nh,dx,dy){
   if(dx||dy)tileMap.clear();
   return true;
 }
-function rescaleComposite(f){
+/* Re-fits the live composite: content maps x -> x*f+tx, y -> y*f+ty. The
+   translation is what makes this terminate — see ensureCompCapacity. f===1 is a
+   pure recentre and costs no resolution at all. */
+function rescaleComposite(f,tx,ty){
+  tx=tx||0;ty=ty||0;
   const nc=document.createElement('canvas');nc.width=compCanvas.width;nc.height=compCanvas.height;
   const nctx=nc.getContext('2d');
-  nctx.drawImage(compCanvas,0,0,Math.round(compCanvas.width*f),Math.round(compCanvas.height*f));
+  nctx.imageSmoothingQuality='high';
+  nctx.drawImage(compCanvas,tx,ty,compCanvas.width*f,compCanvas.height*f);
   compCanvas=nc;compCtx=nctx;
-  comp.ox*=f;comp.oy*=f;comp.minX*=f;comp.minY*=f;comp.maxX*=f;comp.maxY*=f;
-  comp.lastPasteX*=f;comp.lastPasteY*=f;comp.zoom*=f;
+  const TX=v=>v*f+tx,TY=v=>v*f+ty;
+  comp.ox=TX(comp.ox);comp.oy=TY(comp.oy);
+  comp.minX=TX(comp.minX);comp.maxX=TX(comp.maxX);
+  comp.minY=TY(comp.minY);comp.maxY=TY(comp.maxY);
+  comp.lastPasteX=TX(comp.lastPasteX);comp.lastPasteY=TY(comp.lastPasteY);
+  comp.zoom*=f;
+  comp.refits=(comp.refits||0)+1;
   tileMap.clear();
   // A one-off toast was the wrong shape for this. It disappears, the mosaic then
   // looks frozen, and that reads as "capture has stopped" — which cost real
@@ -1292,7 +1317,7 @@ function rescaleComposite(f){
   // recorded video is unaffected, and the enhancer rebuilds from that, never
   // from this preview.
   showReduced();
-  if(!comp.zoomNoted){comp.zoomNoted=true;
+  if(f<1&&!comp.zoomNoted){comp.zoomNoted=true;
     toast('Slide is bigger than the preview canvas — the on-screen mosaic shrinks from here. '
          +'Recording continues at full quality; keep sweeping.');}
 }
@@ -1393,7 +1418,22 @@ function drawMinimap(curX,curY,cap){
 }
 
 let softStreak=0,frameErrors=0,idleTick=0;
+/* Registration health, recorded per capture so a bad sweep is diagnosable
+   afterwards instead of from memory. procFps is how often the tracker actually
+   ran — when it falls, consecutive frames are further apart than MAX_SHIFT and
+   tracking starts dropping, which looks like "it lost me" but is really "the
+   phone could not keep up". */
+let regStats=null;
+function regSummary(){
+  if(!regStats||!regStats.n)return null;
+  const sec=Math.max(0.001,(Date.now()-regStats.t0)/1000);
+  return{procFps:+(regStats.n/sec).toFixed(2),regMs:+(regStats.ms/regStats.n).toFixed(1),
+    loopMs:regStats.loops?+(regStats.loopMs/regStats.loops).toFixed(1):null,
+    n:regStats.n,ok:regStats.ok||0,still:regStats.still||0,discarded:regStats.discarded||0,
+    lost:regStats.lost||0,recovered:regStats.recovered||0};
+}
 function processFrame(){
+  const _l0=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
   try{
     processFrameInner();
   }catch(e){
@@ -1401,6 +1441,10 @@ function processFrame(){
     frameErrors++;
     console.error('frame error:',e);
     setStatus('crit','processing error — '+(e.message||e));
+  }
+  if(regStats){
+    const _l1=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+    regStats.loopMs+=(_l1-_l0);regStats.loops++;
   }
   if(frameErrors<200)scheduleNext();
 }
@@ -1419,7 +1463,13 @@ function processFrameInner(){
     return;
   }
 
+  const _t0=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
   const r=Stitcher.update(grayBuf);
+  if(regStats){
+    const _t1=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+    regStats.n++;regStats.ms+=(_t1-_t0);
+    regStats[r.status]=(regStats[r.status]||0)+1;
+  }
   const cap=frameCanvas?frameCanvas.width:(Number(settings.quality)||1024), scale=cap/REG;
   if(capturing){
     const place=()=>[comp.ox+r.x*scale*comp.zoom, comp.oy+r.y*scale*comp.zoom];
@@ -1494,12 +1544,13 @@ function startCapture(){
   compCanvas.width=2048;compCanvas.height=2048;
   compCtx=compCanvas.getContext('2d');
   Stitcher.reset();
+  regStats={n:0,ms:0,loopMs:0,loops:0,t0:Date.now()};
   sharpHist.length=0;softStreak=0;idleTick=0;
   sweepSpeed=0;lastTrackX=-1e9;lastTrackY=-1e9;
   tileMap.clear();
   startCalibration();
   comp={ox:(2048-cap)/2,oy:(2048-cap)/2,minX:1e9,minY:1e9,maxX:-1e9,maxY:-1e9,
-        scale:cap/REG,zoom:1,zoomNoted:false,
+        scale:cap/REG,zoom:1,zoomNoted:false,refits:0,
         lastPasteX:-1e9,lastPasteY:-1e9,frames:0,startT:Date.now()};
   capturing=true;
   frameErrors=0;
@@ -1539,7 +1590,7 @@ async function finishCapture(){
     deviceLabel:currentDeviceLabel(),videoBlob,videoExt,
     camKey:activeCam,camName:camName(activeCam),
     camNote:(camProfile(activeCam)||{}).note||null,
-    compZoom:+comp.zoom.toFixed(3),
+    compZoom:+comp.zoom.toFixed(3),refits:comp.refits||0,reg:regSummary(),
     fovDiaNativePx:fovDiaNativePx||null,
     nativeSquarePx:nativeSquarePx()||null,
     cap:frameCanvas?frameCanvas.width:(Number(settings.quality)||1024),
@@ -1808,6 +1859,7 @@ $('saveBtn').addEventListener('click',async()=>{
       widthPx:pendingResult.w,heightPx:pendingResult.h,
       frames:pendingResult.frames,durationSec:pendingResult.durationSec,
       deviceLabel:pendingResult.deviceLabel,compZoom:pendingResult.compZoom||1,
+      refits:pendingResult.refits||0,reg:pendingResult.reg||null,
       bytes:blob.size, image:blob, thumb
     };
     if(mpp){settings.mpp=mpp;store.set('mpp',mpp);}
@@ -1919,6 +1971,12 @@ function renderMeta(){
     ['File size',fmtSize(s.bytes||0)],
     ['Source video',s.video?('in library · '+fmtSize(s.videoBytes||s.video.size||0)):
                     s.archiveFolder?('archived · '+s.archiveFolder):'not kept'],
+    ['Preview scale',s.compZoom==null?'—':(s.compZoom>=0.999?'full':
+        'shrunk to '+Math.round(s.compZoom*100)+'% — enhance from the video')],
+    ['Tracking',s.reg?(s.reg.procFps+' fps · '+(s.reg.loopMs!=null?s.reg.loopMs:s.reg.regMs)
+        +' ms/frame (track '+s.reg.regMs+')'
+        +(s.reg.discarded?' · '+s.reg.discarded+' dropped':'')
+        +(s.reg.lost?' · '+s.reg.lost+' lost':'')):'—'],
   ];
   for(const[k,v]of items){
     const d=document.createElement('div');d.className='mitem';
