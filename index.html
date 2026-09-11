@@ -165,8 +165,17 @@
   #scalebar .bar{height:3px;background:var(--text);margin-top:4px;border-radius:2px}
   #zoomHint{position:absolute;right:14px;bottom:14px;font-family:var(--mono);font-size:11px;
     color:var(--faint);background:rgba(20,18,24,.8);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
-  #detailMeta{border-top:1px solid var(--line-soft);background:var(--surface);padding:12px 16px calc(14px + var(--safe-b));
-    max-height:38vh;overflow-y:auto}
+  #detailMeta{border-top:1px solid var(--line-soft);background:var(--surface);padding:12px 16px 14px;
+    max-height:34vh;overflow-y:auto}
+  #detailActions{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line-soft);
+    background:var(--surface);padding:9px 12px calc(9px + var(--safe-b))}
+  #detailActions .grow{flex:1}
+  .abtn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+    min-width:62px;min-height:54px;padding:6px 10px;border-radius:11px;border:1px solid var(--line);
+    background:var(--raised);color:var(--text);font-size:11px;font-weight:600;letter-spacing:.03em}
+  .abtn svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+  .abtn.danger{color:var(--crit);border-color:rgba(224,86,107,.5)}
+  .abtn:active{background:var(--surface)}
   #detailMeta .mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-top:8px}
   .mitem .k{font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--faint)}
   .mitem .v{font-family:var(--mono);font-size:13px;margin-top:2px}
@@ -438,6 +447,7 @@
       <button class="btn ghost" id="openVideoBtn">Stitch a video file</button>
       <button class="btn" id="settingsDone">Done</button>
     </div>
+    <p class="sub" id="buildVer" style="margin-top:12px;text-align:center;font-family:var(--mono);font-size:11px"></p>
   </div>
 </div>
 
@@ -475,18 +485,6 @@
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M15 5l-7 7 7 7"/></svg>
     </button>
     <span class="name" id="detailName"></span>
-    <button class="iconbtn" id="detailEdit" aria-label="Edit slide">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 20l4-1L20 7l-3-3L5 16l-1 4Z"/></svg>
-    </button>
-    <button class="iconbtn" id="detailExport" aria-label="Export slide bundle (PNG + metadata + source video)" title="Export bundle">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 15V4m0 0 4 4m-4-4-4 4M5 13v6h14v-6"/></svg>
-    </button>
-    <button class="iconbtn" id="detailDownload" aria-label="Download PNG">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 4v12m0 0 5-5m-5 5-5-5M4 20h16"/></svg>
-    </button>
-    <button class="iconbtn" id="detailDelete" aria-label="Delete slide">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M5 7h14M10 7V5h4v2m-7 0 1 13h8l1-13"/></svg>
-    </button>
   </div>
   <div id="viewerWrap">
     <canvas id="viewerCanvas"></canvas>
@@ -496,6 +494,24 @@
   <div id="detailMeta">
     <div class="mgrid" id="metaGrid"></div>
     <div id="detailNotes"></div>
+  </div>
+  <!-- Actions live at the BOTTOM: at the scope one hand is on the stage, and the
+       top of a large phone is both out of thumb reach and where iOS puts the
+       clock and the charging indicator. -->
+  <div id="detailActions">
+    <button class="abtn" id="detailEdit" aria-label="Edit slide details">
+      <svg viewBox="0 0 24 24"><path d="M4 20l4-1L20 7l-3-3L5 16l-1 4Z"/></svg><span>Edit</span>
+    </button>
+    <button class="abtn" id="detailExport" aria-label="Export slide bundle (PNG + metadata + source video)">
+      <svg viewBox="0 0 24 24"><path d="M12 15V4m0 0 4 4m-4-4-4 4M5 13v6h14v-6"/></svg><span>Export</span>
+    </button>
+    <button class="abtn" id="detailDownload" aria-label="Download PNG">
+      <svg viewBox="0 0 24 24"><path d="M12 4v12m0 0 5-5m-5 5-5-5M4 20h16"/></svg><span>PNG</span>
+    </button>
+    <span class="grow"></span>
+    <button class="abtn danger" id="detailDelete" aria-label="Delete slide">
+      <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2m-7 0 1 13h8l1-13"/></svg><span>Delete</span>
+    </button>
   </div>
 </div>
 
@@ -602,6 +618,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
+const APP_VERSION='v14';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -668,6 +685,14 @@ const CALIB_FRAMES=20;
 const SPEED_WARN=5.5;
 let sweepSpeed=0,lastTrackX=-1e9,lastTrackY=-1e9;
 let fov=null;                 // {cx,cy,r} in REG coords, or null = full frame
+/* Field-of-view watchdog. If the physical lens changes mid-session (iOS moving
+   between the lenses behind a virtual camera) or the adapter shifts on the
+   eyepiece, the bright field-stop disc changes size — and the µm/px calibration
+   silently stops applying. This is a HEURISTIC on the bright-pixel fraction, not
+   a lens report: it warns, and records the fact on the slide. It never changes
+   what is captured. */
+let fovThr=0,fovCov0=0,fovCovNow=0,fovDrift=false,fovTick=0;
+const FOV_DRIFT=0.45;         // relative change that counts; tissue alone moves it far less
 let fovDiaNativePx=0;         // eyepiece field-stop diameter in native camera px
 function nativeSquarePx(){
   const w=video&&video.videoWidth||0,h=video&&video.videoHeight||0;
@@ -700,6 +725,7 @@ function computeFov(maxHold){
   if(coverage>0.92||area<400){fov=null;fovDiaNativePx=nativeSquarePx();Stitcher.MAX_SHIFT=REG*0.4;return;}  // full-frame source
   const cx=sx/area, cy=sy/area, r=Math.sqrt(area/Math.PI);
   fov={cx,cy,r};
+  fovThr=thr;fovCov0=coverage;fovCovNow=coverage;
   // physical-scale calibration: the field-stop circle in native camera pixels
   fovDiaNativePx=(2*r/REG)*nativeSquarePx();
   Stitcher.MAX_SHIFT=r*1.05;          // allow any shift that still overlaps the field
@@ -1076,7 +1102,7 @@ async function writeArchive(rec,videoBlob,videoExt){
   }
   await writeFile('slide.png',rec.image);
   const meta={...rec};delete meta.image;delete meta.thumb;
-  meta.app='SlideStitch';meta.schema=1;
+  meta.app='SlideStitch '+(meta.appVersion||'(pre-v14)');meta.schema=1;
   await writeFile('meta.json',JSON.stringify(meta,null,2));
   if(videoBlob)await writeFile('source.'+(videoExt||'webm'),videoBlob);
   rec.archiveFolder=base;
@@ -1091,7 +1117,7 @@ async function rewriteArchiveMeta(rec){
     if(!await archivePermissionOK())return false;
     const dir=await archiveHandle.getDirectoryHandle(rec.archiveFolder);
     const meta={...rec};delete meta.image;delete meta.thumb;
-    meta.app='SlideStitch';meta.schema=1;
+    meta.app='SlideStitch '+(meta.appVersion||'(pre-v14)');meta.schema=1;
     const fh=await dir.getFileHandle('meta.json',{create:true});
     const w=await fh.createWritable();
     await w.write(JSON.stringify(meta,null,2));
@@ -1487,11 +1513,19 @@ function processFrameInner(){
         pasteFrame(px,py,cap);
         comp.lastPasteX=px;comp.lastPasteY=py;
       }
+      if(fov&&fovCov0>0&&(++fovTick%8===0)){
+        let above=0,seen=0;
+        for(let i=0;i<grayBuf.length;i+=3){if(grayBuf[i]>fovThr)above++;seen++;}
+        const c=above/Math.max(seen,1);
+        fovCovNow=fovCovNow*0.7+c*0.3;
+        if(!fovDrift&&Math.abs(fovCovNow-fovCov0)/fovCov0>FOV_DRIFT)fovDrift=true;
+      }
       const step=Math.hypot(px-lastTrackX,py-lastTrackY)/Math.max(cap*comp.zoom,1)*REG;
       if(isFinite(step)&&lastTrackX>-1e8)sweepSpeed=sweepSpeed*0.8+step*0.2;
       lastTrackX=px;lastTrackY=py;
       const tooFast=settings.speedCue&&sweepSpeed>SPEED_WARN;
-      setStatus(r.status==='recovered'?'ok':(tooFast?'warn':'live'),
+      setStatus(fovDrift?'crit':(r.status==='recovered'?'ok':(tooFast?'warn':'live')),
+        fovDrift?'field of view changed — lens or adapter moved; the scale no longer applies':
         r.status==='recovered'?'track reacquired ✓':
         tooFast?'slow down — sweeping faster than the camera stays sharp':
         softStreak>10?'image soft — check focus':'stitching');
@@ -1546,6 +1580,7 @@ function startCapture(){
   compCtx=compCanvas.getContext('2d');
   Stitcher.reset();
   regStats={n:0,ms:0,loopMs:0,loops:0,t0:Date.now()};
+  fovDrift=false;fovCovNow=0;fovTick=0;
   sharpHist.length=0;softStreak=0;idleTick=0;
   sweepSpeed=0;lastTrackX=-1e9;lastTrackY=-1e9;
   tileMap.clear();
@@ -1592,6 +1627,7 @@ async function finishCapture(){
     camKey:activeCam,camName:camName(activeCam),
     camNote:(camProfile(activeCam)||{}).note||null,
     compZoom:+comp.zoom.toFixed(3),refits:comp.refits||0,reg:regSummary(),
+    fovChanged:!!fovDrift,appVersion:APP_VERSION,
     fovDiaNativePx:fovDiaNativePx||null,
     nativeSquarePx:nativeSquarePx()||null,
     cap:frameCanvas?frameCanvas.width:(Number(settings.quality)||1024),
@@ -1609,6 +1645,7 @@ function currentDeviceLabel(){
   const t=mediaStream&&mediaStream.getVideoTracks()[0];
   return t?t.label||'camera':'camera';
 }
+function isVirtualCam(label){return /\b(triple|dual\s*wide|dual)\b/i.test(label||'');}
 async function listCameras(){
   try{
     const devs=await navigator.mediaDevices.enumerateDevices();
@@ -1616,7 +1653,13 @@ async function listCameras(){
     const sel=$('setCamera');sel.innerHTML='';
     videoDevices.forEach((d,i)=>{
       const o=document.createElement('option');
-      o.value=d.deviceId;o.textContent=d.label||('Camera '+(i+1));
+      // "Back Triple/Dual Camera" are VIRTUAL devices: iOS moves between the
+      // physical lenses behind them on its own. Down an eyepiece that changes
+      // the field of view mid-session and invalidates the scale, so say so in
+      // the list. Not auto-corrected: camera profiles are keyed to the deviceId,
+      // and silently switching would orphan a calibration.
+      o.value=d.deviceId;
+      o.textContent=(d.label||('Camera '+(i+1)))+(isVirtualCam(d.label)?'  ⚠︎ switches lenses':'');
       sel.appendChild(o);
     });
     if(settings.cameraId)sel.value=settings.cameraId;
@@ -1861,6 +1904,7 @@ $('saveBtn').addEventListener('click',async()=>{
       frames:pendingResult.frames,durationSec:pendingResult.durationSec,
       deviceLabel:pendingResult.deviceLabel,compZoom:pendingResult.compZoom||1,
       refits:pendingResult.refits||0,reg:pendingResult.reg||null,
+      fovChanged:!!pendingResult.fovChanged,appVersion:pendingResult.appVersion||APP_VERSION,
       bytes:blob.size, image:blob, thumb
     };
     if(mpp){settings.mpp=mpp;store.set('mpp',mpp);}
@@ -1986,6 +2030,7 @@ function renderMeta(){
                     s.archiveFolder?('archived · '+s.archiveFolder):'not kept'],
     ['Preview scale',s.compZoom==null?'—':(s.compZoom>=0.999?'full':
         'shrunk to '+Math.round(s.compZoom*100)+'% — enhance from the video')],
+    ['Field of view',s.fovChanged?'CHANGED mid-capture — scale unreliable':'steady'],
     ['Tracking',s.reg?(s.reg.procFps+' fps · '+(s.reg.loopMs!=null?s.reg.loopMs:s.reg.regMs)
         +' ms/frame (track '+s.reg.regMs+')'
         +(s.reg.discarded?' · '+s.reg.discarded+' dropped':'')
@@ -2144,7 +2189,7 @@ function slideFolderName(rec){
 }
 function slideMetaJSON(rec){
   const meta={...rec};delete meta.image;delete meta.thumb;delete meta.video;
-  meta.app='SlideStitch';meta.schema=1;
+  meta.app='SlideStitch '+(meta.appVersion||'(pre-v14)');meta.schema=1;
   return JSON.stringify(meta,null,2);
 }
 async function deliverFile(blob,filename,what){
@@ -2755,6 +2800,7 @@ $('setCamBtn').addEventListener('click',()=>{
 
 /* ---------------- Settings ---------------- */
 function syncSettingsUI(){
+  $('buildVer').textContent='SlideStitch '+APP_VERSION;
   const cam=activeCam,cal=camCalib(cam),objs=calibratedObjectives(cam),prof=camProfile(cam);
   $('setCamProfile').textContent=cam
     ? 'This camera is \u201c'+prof.name+'\u201d'+(prof.note?' \u2014 '+prof.note:'')+'. Its scale is stored separately '
