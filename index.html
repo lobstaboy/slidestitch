@@ -490,6 +490,8 @@
       <button class="btn ghost" id="editCancel">Cancel</button>
       <button class="btn" id="editSave">Save changes</button>
     </div>
+    <button class="btn ghost" id="editRestitch" style="width:100%;justify-content:center;margin-top:10px">Re-stitch from the video</button>
+    <p class="sub" id="editRestitchNote" style="margin-top:6px"></p>
   </div>
 </div>
 
@@ -2319,9 +2321,16 @@ async function openDetail(id){
   renderMeta();
   try{detailBitmap=await createImageBitmap(detailSlide.image);}
   catch(e){ // fallback via object URL
-    detailBitmap=await new Promise((res,rej)=>{
-      const im=new Image();im.onload=()=>res(im);im.onerror=rej;
-      im.src=URL.createObjectURL(detailSlide.image);});
+    try{
+      detailBitmap=await new Promise((res,rej)=>{
+        const im=new Image();im.onload=()=>res(im);im.onerror=rej;
+        im.src=URL.createObjectURL(detailSlide.image);});
+    }catch(e2){
+      detailBitmap=null;
+      setStatus('warn','image unreadable');
+      toast('This slide\u2019s image could not be read. Its metadata and source video are still here — '
+           +'try Edit \u2192 Re-stitch from the video.');
+    }
   }
   fitViewer();
   drawViewer();
@@ -2644,12 +2653,34 @@ function buildEditCamSelect(){
   const p=camProfile(editCam);
   $('editCamNote').textContent=p&&p.note?p.note:(editCam?'':'Set this to give an older slide physical units.');
 }
+$('editRestitch').addEventListener('click',()=>{
+  if(!detailSlide)return;
+  if(!detailSlide.video){toast('This slide has no source video, so it cannot be re-stitched.');return;}
+  queueRestitch(detailSlide.id);
+  if(!settings.autoRestitch)toast('Queued. Turn on re-stitching in Capture settings to let it run.');
+  else{
+    $('editSheet').classList.remove('open');
+    closeDetail();
+    showView('library');
+    toast('Queued — it will run here on the Slides tab.');
+  }
+});
 $('editCam').addEventListener('change',e=>{
   editCam=e.target.value||null;
   buildEditCamSelect();refreshEditScale();
 });
 $('detailEdit').addEventListener('click',()=>{
   if(!detailSlide)return;
+  (function(){
+    const has=!!detailSlide.video, r=detailSlide.restitched;
+    $('editRestitch').disabled=!has||restitch.queue.includes(detailSlide.id);
+    $('editRestitchNote').textContent=!has
+      ? 'No source video is stored with this slide, so there is nothing to re-stitch from.'
+      : restitch.queue.includes(detailSlide.id) ? 'Already queued.'
+      : r&&r.skipped ? 'Tried before and covered less than the original, so the original was kept.'
+      : r ? 'Already re-stitched at full quality. Running it again is harmless.'
+      : 'Rebuilds this slide from its video at full tile resolution. Takes a few minutes and runs on the Slides tab.';
+  })();
   $('editName').value=detailSlide.name;
   $('editMpp').value=detailSlide.mpp??'';
   $('editMag').value=detailSlide.mag||'';
