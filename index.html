@@ -648,7 +648,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v18';
+const APP_VERSION='v19';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -1989,24 +1989,97 @@ function seekTo(t){
   });
 }
 
+const okDur=d=>isFinite(d)&&d>0&&d<86400;
+/* A file written by MediaRecorder — which is every scan this app records —
+   usually reports duration Infinity until something has visited the end of it.
+   Seeking far past the end makes the browser resolve it. If even that fails,
+   the record itself knows how long the capture ran. */
+async function resolveDuration(fallbackSec){
+  if(okDur(video.duration))return video.duration;
+  await new Promise(res=>{
+    let settled=false;
+    const done=()=>{
+      if(settled)return;settled=true;
+      video.removeEventListener('durationchange',probe);
+      video.removeEventListener('seeked',probe);
+      res();
+    };
+    const probe=()=>{if(okDur(video.duration))done();};
+    video.addEventListener('durationchange',probe);
+    video.addEventListener('seeked',probe);
+    try{video.currentTime=1e7;}catch(e){done();}
+    setTimeout(done,4000);
+  });
+  if(okDur(video.duration)){try{await seekTo(0);}catch(e){}return video.duration;}
+  return okDur(fallbackSec)?fallbackSec:0;
+}
+
+/* Fallback for a file that cannot be seeked at all: let it play and pause on
+   every decoded frame. Every frame is still processed — this is NOT the
+   "play it and take what you can" approach that measured worse — it just
+   cannot report a percentage when the duration is unknown. */
+async function restitchDriveByPlayback(dur){
+  const alive=()=>restitching&&!restitch.abort;
+  let n=0;
+  await new Promise(res=>{
+    let done=false;
+    const finish=()=>{if(done)return;done=true;res();};
+    video.addEventListener('ended',finish,{once:true});
+    const again=()=>{
+      if('requestVideoFrameCallback' in HTMLVideoElement.prototype)video.requestVideoFrameCallback(tick);
+      else setTimeout(tick,33);
+    };
+    const tick=async()=>{
+      if(done)return;
+      if(!alive())return finish();
+      try{video.pause();}catch(e){}
+      processFrame();n++;
+      if(n%8===0){
+        if(okDur(dur))showRestitchProgress(Math.min(99,Math.round(video.currentTime/dur*100)));
+        else showRestitchProgress(Math.min(95,n/4),'Re-stitching '+restitch.name+' — '+n+' frames');
+        await new Promise(r=>setTimeout(r,0));
+      }
+      if(okDur(dur)&&video.currentTime>=dur-0.05)return finish();
+      try{await video.play();}catch(e){return finish();}
+      again();
+    };
+    video.play().then(again,finish);
+    setTimeout(finish,25*60*1000);
+  });
+}
+
 async function restitchDrive(){
-  const dur=video.duration||0;
-  if(!isFinite(dur)||dur<=0){toast('That video has no readable duration — skipping.');return finishRestitch();}
+  const dur=await resolveDuration(restitchRec&&restitchRec.durationSec);
   const step=1/RESTITCH_FPS;
   const alive=()=>restitching&&!restitch.abort;
   try{
-    // Calibration first: the field-stop circle has to be known before anything
-    // is pasted, and it is measured by max-holding the opening frames.
-    let t=0;
-    while(calib&&t<dur&&alive()){await seekTo(t);processFrame();t+=step;}
-    // Then the sweep, from the top.
-    let i=0;
-    for(t=0;t<dur&&alive();t+=step,i++){
-      await seekTo(t);
-      processFrame();
-      if(i%8===0){
-        showRestitchProgress(Math.min(99,Math.round(t/dur*100)));
-        await new Promise(r=>setTimeout(r,0));   // keep the tab responsive
+    if(!okDur(dur)){
+      // No duration from the container and none on the record: play it instead.
+      await restitchDriveByPlayback(0);
+    }else{
+      // Prove seeking works BEFORE anything depends on it. A MediaRecorder file
+      // without cues can accept a seek and not move; calibration would then
+      // max-hold one frame and measure the wrong field-stop circle.
+      const probeT=Math.min(dur*0.5,Math.max(0.1,dur-0.1));
+      await seekTo(probeT);
+      const seekable=Math.abs(video.currentTime-probeT)<Math.max(0.5,dur*0.08);
+      try{await seekTo(0);}catch(e){}
+      if(!seekable){
+        await restitchDriveByPlayback(dur);
+      }else{
+        // Calibration first: the field-stop circle has to be known before
+        // anything is pasted, and it is measured by max-holding opening frames.
+        let t=0;
+        while(calib&&t<dur&&alive()){await seekTo(t);processFrame();t+=step;}
+        let i=0;
+        for(t=0;t<dur&&alive();t+=step,i++){
+          await seekTo(t);
+          processFrame();
+          if(i%8===0){
+            showRestitchProgress(Math.min(99,Math.round(t/dur*100)));
+            await new Promise(r=>setTimeout(r,0));   // keep the tab responsive
+          }
+        }
       }
     }
   }catch(e){
