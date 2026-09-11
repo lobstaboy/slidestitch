@@ -136,6 +136,15 @@
   #libHead h1{font-size:20px;letter-spacing:-.01em}
   #storageNote{font-family:var(--mono);font-size:11px;color:var(--faint)}
   #libScroll{flex:1;overflow-y:auto;padding:14px 16px calc(16px + var(--safe-b))}
+  #restitchPill{display:none;align-items:center;gap:10px;margin-top:10px;padding:9px 12px;
+    border:1px solid var(--line);border-radius:10px;background:var(--raised)}
+  #restitchPill.on{display:flex}
+  #restitchPill .t{flex:1;min-width:0;font-size:12px;color:var(--muted);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #restitchPill .b{width:96px;height:6px;border-radius:99px;background:#241f2d;overflow:hidden}
+  #restitchPill .b i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s}
+  .card .rs{display:block;height:4px;background:#241f2d}
+  .card .rs i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s}
   #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
   .card{background:var(--surface);border:1px solid var(--line-soft);border-radius:12px;overflow:hidden;
     text-align:left;display:flex;flex-direction:column;transition:border-color .15s}
@@ -248,7 +257,9 @@
       <div class="toprow"><h1>Slides</h1><span id="storageNote"></span></div>
       <input type="search" id="searchInput" placeholder="Search by name, notes, stain…" aria-label="Search slides">
     </div>
-    <div id="libScroll">
+    <div id="restitchPill"><span class="t" id="restitchText"></span>
+    <span class="b"><i id="restitchBar"></i></span></div>
+  <div id="libScroll">
       <div id="grid"></div>
       <div id="emptyLib">
         <div class="scopeicon">🧫</div>
@@ -421,6 +432,10 @@
     <label class="sub" style="display:flex;gap:9px;align-items:flex-start;font-weight:400;margin:6px 0">
       <input type="checkbox" id="setHiRes" style="width:auto;margin-top:2px">
       <span>Record at the camera's highest resolution and bitrate. Much more real detail; larger files.</span></label>
+    <label class="sub" style="display:flex;gap:9px;align-items:flex-start;font-weight:400;margin:6px 0">
+      <input type="checkbox" id="setAutoRestitch" style="width:auto;margin-top:2px">
+      <span>After a scan, re-stitch it from its own video at full tile resolution. Runs on the Slides
+      tab while the camera is idle; switching to Capture pauses it.</span></label>
     <label class="sub" style="display:flex;gap:9px;align-items:flex-start;font-weight:400;margin:6px 0">
       <input type="checkbox" id="setLockAF" style="width:auto;margin-top:2px">
       <span>Lock focus, exposure and white balance while recording, so the phone can't refocus mid-sweep.</span></label>
@@ -621,7 +636,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v15';
+const APP_VERSION='v16';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -785,7 +800,8 @@ const settings={
   camBind:store.get('camBind',{}),                // deviceId -> camKey: which profile this port means now
   hiRes:store.get('hiRes',true),                  // request the camera's highest resolution
   lockAF:store.get('lockAF',true),                // lock focus/exposure/WB while recording
-  speedCue:store.get('speedCue',true)             // warn when the sweep outruns sharpness
+  speedCue:store.get('speedCue',true),            // warn when the sweep outruns sharpness
+  autoRestitch:store.get('autoRestitch',true)     // re-stitch each scan from its video afterwards
 };
 
 /* ---------------- Magnification & scale calibration ----------------
@@ -1546,6 +1562,7 @@ function processFrameInner(){
 }
 let framePending=false;
 function scheduleNext(){
+  if(restitchSeeking)return;          // the re-stitch drives its own frames
   if(!mediaStream&&!usingFileSource)return;
   if(framePending)return;
   framePending=true;
@@ -1819,7 +1836,253 @@ async function startVideoFile(file){
   toast('Stitching video — it will finish automatically.');
   scheduleNext();
 }
-video.addEventListener('ended',()=>{if(usingFileSource&&capturing)finishCapture();});
+video.addEventListener('ended',()=>{
+  if(!usingFileSource||!capturing||restitching)return;   // a re-stitch ends itself
+  finishCapture();
+});
+
+/* ---------------- Automatic re-stitch ----------------
+   The live mosaic is built from frames downsampled to the paste tile size and
+   then scaled again whenever the composite hits the canvas ceiling — on a 4K
+   phone frame that is about a 4x loss before anything else happens. The source
+   video does not have that loss. So once a scan is saved, stitch it AGAIN from
+   its own video, at the largest canvas this device can hold and the largest
+   tile, and replace the stored image.
+
+   This is not the Mac enhancer and does not pretend to be: no super-resolution,
+   no global optimisation, no OME-TIFF. It is the same stitcher given the
+   resolution it was starved of the first time.
+
+   It runs only on the Slides tab with the camera idle, because it needs the
+   video element and a lot of memory. Switching to Capture pauses it; the slide
+   stays queued. */
+let restitching=false, restitchUrl=null, restitchRec=null, restitchTimer=null;
+let restitchSaved=null;
+const restitch={queue:store.get('restitchQueue',[]),id:null,name:'',pct:0,abort:false,t0:0};
+/* The re-stitch does NOT play the video. Measured on a synthetic sweep: playing
+   it back and taking whatever frames the loop could keep up with made coverage
+   WORSE at a bigger tile, not better — pasting 1536 px tiles runs at 9.6 fps
+   against 14.4 fps for 1024, so the sweep outran the stitcher and the mosaic
+   covered about half the tissue. Worse, it was not repeatable: the same video
+   gave 2.31 and 2.95 fields of view on consecutive runs.
+   Seeking frame by frame removes the race entirely. Every sampled frame is
+   processed however long it takes, so coverage is deterministic and the larger
+   tile actually buys resolution instead of costing coverage. */
+/* 6, measured. Coverage is flat from 4 to 12 samples per second of video
+   (4.51 to 4.74 fields of view on the same clip) because pastes are driven by
+   how far the view MOVED, not by how many frames were looked at — but the time
+   scales straight with the frame count: 10.2s / 14.4s / 16.6s / 23.1s. 6 keeps
+   essentially all the coverage for 60% of the work.
+   The tile stays 1536: at 2048 the mosaic covers exactly the same tissue but
+   hits the canvas ceiling, so compZoom falls to 0.69 and the extra tile size is
+   given straight back — for double the time. */
+const RESTITCH_FPS=6;         // frames sampled per second of video
+const RESTITCH_CAP=1536;      // paste tile size for the re-stitch
+let restitchSeeking=false;
+
+function saveRestitchQueue(){store.set('restitchQueue',restitch.queue.slice(0,40));}
+function queueRestitch(id){
+  if(!settings.autoRestitch||!id)return;
+  if(!restitch.queue.includes(id))restitch.queue.push(id);
+  saveRestitchQueue();kickRestitch();
+}
+function restitchIdle(){
+  return settings.autoRestitch&&!restitching&&!capturing&&!usingFileSource
+      && currentView==='library' && restitch.queue.length>0;
+}
+function kickRestitch(){ if(restitchIdle())setTimeout(runRestitch,400); }
+
+function showRestitchProgress(pct,note){
+  restitch.pct=pct;
+  if(!note&&restitch.t0){
+    const el=Math.round((Date.now()-restitch.t0)/1000);
+    const eta=pct>4?Math.round(el*(100-pct)/pct):null;
+    note='Re-stitching '+restitch.name+' at full quality — '+pct+'%'
+        +(eta!=null&&eta<3600?', about '+(eta>=60?Math.round(eta/60)+' min':eta+'s')+' left':'');
+  }
+  const pill=$('restitchPill');
+  if(!restitching){pill.classList.remove('on');return;}
+  pill.classList.add('on');
+  $('restitchText').textContent=note||('Re-stitching '+restitch.name+' at full quality…');
+  $('restitchBar').style.width=Math.max(0,Math.min(100,pct))+'%';
+  const bar=document.querySelector('.card[data-id="'+restitch.id+'"] .rs i');
+  if(bar)bar.style.width=Math.max(0,Math.min(100,pct))+'%';
+}
+function hideRestitchProgress(){restitching=false;$('restitchPill').classList.remove('on');}
+
+async function runRestitch(){
+  if(!restitchIdle())return;
+  const id=restitch.queue[0];
+  let rec=null;
+  try{rec=await dbGet(id);}catch(e){}
+  if(!rec||!rec.video){
+    restitch.queue.shift();saveRestitchQueue();return kickRestitch();
+  }
+  restitching=true;restitch.abort=false;restitch.id=id;restitch.name=rec.name||'slide';restitch.t0=Date.now();
+  restitchRec=rec;
+  showRestitchProgress(0,'Re-stitching '+restitch.name+' — reading the video…');
+  // The video element is shared with the live preview, so the camera must let go.
+  if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
+  restitchSaved={quality:settings.quality,maxCanvas:settings.maxCanvas};
+  settings.quality=Math.max(Number(settings.quality)||1024,RESTITCH_CAP);
+  settings.maxCanvas=CANVAS_CEILING;
+  usingFileSource=true;
+  video.srcObject=null;
+  restitchUrl=URL.createObjectURL(rec.video);
+  video.src=restitchUrl;video.loop=false;video.muted=true;
+  restitchSeeking=true;
+  await new Promise(r=>{
+    if(video.readyState>=1)return r();
+    const h=()=>{video.removeEventListener('loadedmetadata',h);r();};
+    video.addEventListener('loadedmetadata',h);setTimeout(r,4000);
+  });
+  try{video.pause();}catch(e){}
+  beginRestitchPass();
+  restitchDrive();
+}
+
+function seekTo(t){
+  return new Promise(res=>{
+    let settled=false;
+    const done=()=>{if(settled)return;settled=true;video.removeEventListener('seeked',done);res();};
+    video.addEventListener('seeked',done);
+    try{video.currentTime=t;}catch(e){done();}
+    setTimeout(done,1500);            // a seek that never lands must not wedge the pass
+  });
+}
+
+async function restitchDrive(){
+  const dur=video.duration||0;
+  if(!isFinite(dur)||dur<=0){toast('That video has no readable duration — skipping.');return finishRestitch();}
+  const step=1/RESTITCH_FPS;
+  const alive=()=>restitching&&!restitch.abort;
+  try{
+    // Calibration first: the field-stop circle has to be known before anything
+    // is pasted, and it is measured by max-holding the opening frames.
+    let t=0;
+    while(calib&&t<dur&&alive()){await seekTo(t);processFrame();t+=step;}
+    // Then the sweep, from the top.
+    let i=0;
+    for(t=0;t<dur&&alive();t+=step,i++){
+      await seekTo(t);
+      processFrame();
+      if(i%8===0){
+        showRestitchProgress(Math.min(99,Math.round(t/dur*100)));
+        await new Promise(r=>setTimeout(r,0));   // keep the tab responsive
+      }
+    }
+  }catch(e){
+    console.error('restitch pass failed',e);
+    restitch.abort=true;
+  }
+  if(restitching)finishRestitch();
+}
+
+/* The mechanical half of startCapture, without the camera prompts, the
+   recorder, or the wake lock — none of which apply to a video already shot. */
+function beginRestitchPass(){
+  const cap=Number(settings.quality)||1024;
+  buildFrameCanvases(cap);
+  compCanvas=document.createElement('canvas');
+  compCanvas.width=2048;compCanvas.height=2048;
+  compCtx=compCanvas.getContext('2d');
+  Stitcher.reset();
+  regStats={n:0,ms:0,loopMs:0,loops:0,t0:Date.now()};
+  fovDrift=false;fovCovNow=0;fovTick=0;
+  sharpHist.length=0;softStreak=0;idleTick=0;
+  sweepSpeed=0;lastTrackX=-1e9;lastTrackY=-1e9;
+  tileMap.clear();
+  startCalibration();
+  comp={ox:(2048-cap)/2,oy:(2048-cap)/2,minX:1e9,minY:1e9,maxX:-1e9,maxY:-1e9,
+        scale:cap/REG,zoom:1,zoomNoted:false,refits:0,
+        lastPasteX:-1e9,lastPasteY:-1e9,frames:0,startT:Date.now()};
+  capturing=true;frameErrors=0;
+  hideReduced();
+  scheduleNext();
+}
+
+async function finishRestitch(){
+  capturing=false;calib=null;
+  if(restitchTimer){clearInterval(restitchTimer);restitchTimer=null;}
+  const rec=restitchRec;
+  const good=!restitch.abort&&rec&&comp&&comp.frames>=2;
+  if(good){
+    try{
+      showRestitchProgress(99,'Saving '+restitch.name+'…');
+      const w=Math.round(comp.maxX-comp.minX),h=Math.round(comp.maxY-comp.minY);
+      const out=document.createElement('canvas');out.width=w;out.height=h;
+      out.getContext('2d').drawImage(compCanvas,comp.minX,comp.minY,w,h,0,0,w,h);
+      const blob=await new Promise(r=>out.toBlob(r,'image/png'));
+      const tw=320,th=Math.max(1,Math.round(320*h/w));
+      const tc=document.createElement('canvas');tc.width=tw;tc.height=th;
+      tc.getContext('2d').drawImage(out,0,0,tw,th);
+      const thumb=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.8));
+      const cap=frameCanvas?frameCanvas.width:(Number(settings.quality)||1024);
+      const before=rec.widthPx+'\u00d7'+rec.heightPx;
+      // A re-stitch that tracked worse than the live pass would COVER LESS
+      // tissue, and replacing a good scan with it would be a silent loss.
+      // Compare coverage in fields-of-view, not pixels: the two passes use
+      // different tile sizes and composite scales, so raw pixel counts are not
+      // comparable. Anything under 90% of the original keeps the original.
+      const fovs=(w,h,c,z)=>(w*h)/Math.max(1,(c*(z||1))*(c*(z||1)));
+      const wasFovs=fovs(rec.widthPx,rec.heightPx,rec.stitchCap||1024,rec.compZoom||1);
+      const nowFovs=fovs(w,h,cap,comp.zoom);
+      const covered=wasFovs>0?nowFovs/wasFovs:1;
+      if(blob&&thumb&&covered<0.9){
+        rec.restitched={at:Date.now(),skipped:true,covered:+covered.toFixed(2),app:APP_VERSION};
+        await dbPut(rec);
+        toast('Re-stitch covered only '+Math.round(covered*100)+'% of the scan — keeping the original.');
+      }else if(blob&&thumb){
+        rec.image=blob;rec.thumb=thumb;rec.bytes=blob.size;
+        rec.widthPx=w;rec.heightPx=h;
+        rec.stitchCap=cap;rec.compZoom=+comp.zoom.toFixed(3);
+        rec.refits=comp.refits||0;rec.reg=regSummary();rec.fovChanged=!!fovDrift;
+        // The composite scale changed, so the microns per pixel did too. Leaving
+        // the old value would put a silently wrong scale bar on the slide.
+        const nm=compositeMpp(rec.mppNative,rec.nativeSquarePx,cap,comp.zoom);
+        if(nm)rec.mpp=nm;
+        rec.restitched={at:Date.now(),cap:cap,compZoom:+comp.zoom.toFixed(3),app:APP_VERSION};
+        await dbPut(rec);
+        toast('Re-stitched '+restitch.name+': '+before+' \u2192 '+w+'\u00d7'+h+'.');
+      }
+      restitch.queue=restitch.queue.filter(x=>x!==restitch.id);
+      saveRestitchQueue();
+    }catch(e){
+      console.error('restitch save failed',e);
+      toast('Re-stitch could not be saved — the scan is untouched.');
+      restitch.queue=restitch.queue.filter(x=>x!==restitch.id);
+      saveRestitchQueue();
+    }
+  }
+  cleanupRestitch();
+  refreshLibrary();
+  kickRestitch();
+}
+
+function cleanupRestitch(){
+  capturing=false;
+  if(restitchTimer){clearInterval(restitchTimer);restitchTimer=null;}
+  if(restitchSaved){
+    settings.quality=restitchSaved.quality;settings.maxCanvas=restitchSaved.maxCanvas;
+    restitchSaved=null;
+  }
+  usingFileSource=false;restitchSeeking=false;
+  try{video.pause();}catch(e){}
+  video.src='';video.removeAttribute('src');
+  try{video.playbackRate=1;}catch(e){}
+  if(restitchUrl){URL.revokeObjectURL(restitchUrl);restitchUrl=null;}
+  restitchRec=null;restitch.id=null;
+  hideRestitchProgress();
+}
+
+/* Called when the user wants the camera back. The slide stays queued. */
+function abortRestitch(){
+  if(!restitching)return false;
+  restitch.abort=true;
+  cleanupRestitch();
+  toast('Re-stitch paused — it will pick up again on the Slides tab.');
+  return true;
+}
 
 /* ---------------- Save sheet ---------------- */
 let pendingResult=null;
@@ -1918,6 +2181,7 @@ $('saveBtn').addEventListener('click',async()=>{
     // library with the slide, so nothing is lost before it reaches the Mac.
     if(!archiveHandle&&vb){rec.video=vb;rec.videoExt=ve||'mp4';rec.videoBytes=vb.size;}
     await dbPut(rec);
+    if(rec.video)queueRestitch(rec.id);
     $('saveSheet').classList.remove('open');
     pendingResult=null;
     refreshLibrary();
@@ -1951,11 +2215,15 @@ function renderLibrary(){
     const card=document.createElement('button');
     card.className='card';
     const phys=physSize(s.widthPx,s.heightPx,s.mpp);
+    card.dataset.id=s.id;
+    const queued=restitch.queue.includes(s.id);
     card.innerHTML='<span class="thumb"><img alt=""></span>'
+      +(queued?'<span class="rs"><i></i></span>':'')
       +'<span class="info"><span class="name"></span><span class="meta"></span></span>';
     card.querySelector('.name').textContent=s.name;
     card.querySelector('.meta').textContent=
-      new Date(s.createdAt).toLocaleDateString()+' · '+s.widthPx+'×'+s.heightPx+(phys?' · '+phys:'');
+      new Date(s.createdAt).toLocaleDateString()+' · '+s.widthPx+'×'+s.heightPx+(phys?' · '+phys:'')
+      +(s.restitched?' · full quality':(queued?' · re-stitch queued':''));
     const img=card.querySelector('img');
     img.src=URL.createObjectURL(s.thumb);
     img.onload=()=>URL.revokeObjectURL(img.src);
@@ -2821,6 +3089,7 @@ function syncSettingsUI(){
   $('setQuality').value=String(settings.quality);
   $('setMaxCanvas').value=String(settings.maxCanvas);
   $('setHiRes').checked=!!settings.hiRes;
+  $('setAutoRestitch').checked=!!settings.autoRestitch;
   $('setLockAF').checked=!!settings.lockAF;
   $('setSpeedCue').checked=!!settings.speedCue;
   syncObjPill();
@@ -2831,9 +3100,10 @@ $('settingsDone').addEventListener('click',()=>{
   settings.quality=Number($('setQuality').value);
   settings.maxCanvas=Number($('setMaxCanvas').value);
   settings.hiRes=$('setHiRes').checked;
+  settings.autoRestitch=$('setAutoRestitch').checked;
   settings.lockAF=$('setLockAF').checked;
   settings.speedCue=$('setSpeedCue').checked;
-  store.set('mag',settings.mag);store.set('hiRes',settings.hiRes);
+  store.set('mag',settings.mag);store.set('hiRes',settings.hiRes);store.set('autoRestitch',settings.autoRestitch);
   store.set('lockAF',settings.lockAF);store.set('speedCue',settings.speedCue);
   store.set('quality',settings.quality);store.set('maxCanvas',settings.maxCanvas);store.set('maxCanvasUser',true);
   const camId=$('setCamera').value;
@@ -2862,6 +3132,7 @@ $('videoFileInput').addEventListener('change',e=>{
 
 /* ---------------- Record button + tabs ---------------- */
 $('recBtn').addEventListener('click',()=>{
+  if(restitching){abortRestitch();startCamera(settings.cameraId);return;}
   if(!mediaStream&&!usingFileSource){toast('Enable the camera first.');return;}
   if(!capturing)startCapture();else finishCapture();
 });
@@ -2871,12 +3142,18 @@ document.addEventListener('keydown',e=>{
   if(k==='s'&&!capturing&&(mediaStream||usingFileSource))startCapture();
   else if(k==='f'&&capturing)finishCapture();
 });
+let currentView='capture';
 function showView(name){
+  currentView=name;
+  if(name==='capture'){
+    // The camera has to come back, so pause any re-stitch first.
+    if(abortRestitch()&&settings.cameraId!==undefined)startCamera(settings.cameraId);
+  }
   $('capture').classList.toggle('active',name==='capture');
   $('library').classList.toggle('active',name==='library');
   $('tabCapture').classList.toggle('on',name==='capture');
   $('tabLibrary').classList.toggle('on',name==='library');
-  if(name==='library')refreshLibrary();
+  if(name==='library'){refreshLibrary();kickRestitch();}
 }
 $('tabCapture').addEventListener('click',()=>showView('capture'));
 $('tabLibrary').addEventListener('click',()=>showView('library'));
@@ -2886,6 +3163,7 @@ $('enableCamBtn').addEventListener('click',()=>startCamera(settings.cameraId));
 $('archiveBtn').addEventListener('click',chooseArchiveFolder);
 syncSettingsUI();
 refreshLibrary();
+if(restitch.queue.length)setTimeout(kickRestitch,1500);
 loadArchiveHandle();
 if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){
   $('enableCamBtn').disabled=true;
