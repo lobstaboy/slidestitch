@@ -636,7 +636,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v16';
+const APP_VERSION='v17';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -1245,7 +1245,11 @@ const $=id=>document.getElementById(id);
 function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');
   clearTimeout(toast._h);toast._h=setTimeout(()=>t.classList.remove('show'),2400);}
 function fmtDate(ts){return new Date(ts).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});}
-function fmtSize(b){return b>1048576?(b/1048576).toFixed(1)+' MB':Math.round(b/1024)+' KB';}
+function fmtSize(b){
+  if(b>=1073741824)return (b/1073741824).toFixed(b>=10737418240?0:1)+' GB';
+  if(b>1048576)return (b/1048576).toFixed(1)+' MB';
+  return Math.round(b/1024)+' KB';
+}
 function physSize(w,h,mpp){
   if(!mpp)return null;
   const mmw=w*mpp/1000,mmh=h*mpp/1000;
@@ -1876,6 +1880,7 @@ const restitch={queue:store.get('restitchQueue',[]),id:null,name:'',pct:0,abort:
    The tile stays 1536: at 2048 the mosaic covers exactly the same tissue but
    hits the canvas ceiling, so compZoom falls to 0.69 and the extra tile size is
    given straight back — for double the time. */
+const THUMB_W=800;            // library card thumbnails, in real pixels
 const RESTITCH_FPS=6;         // frames sampled per second of video
 const RESTITCH_CAP=1536;      // paste tile size for the re-stitch
 let restitchSeeking=false;
@@ -2013,10 +2018,10 @@ async function finishRestitch(){
       const out=document.createElement('canvas');out.width=w;out.height=h;
       out.getContext('2d').drawImage(compCanvas,comp.minX,comp.minY,w,h,0,0,w,h);
       const blob=await new Promise(r=>out.toBlob(r,'image/png'));
-      const tw=320,th=Math.max(1,Math.round(320*h/w));
+      const tw=THUMB_W,th=Math.max(1,Math.round(THUMB_W*h/w));
       const tc=document.createElement('canvas');tc.width=tw;tc.height=th;
       tc.getContext('2d').drawImage(out,0,0,tw,th);
-      const thumb=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.8));
+      const thumb=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.85));
       const cap=frameCanvas?frameCanvas.width:(Number(settings.quality)||1024);
       const before=rec.widthPx+'\u00d7'+rec.heightPx;
       // A re-stitch that tracked worse than the live pass would COVER LESS
@@ -2139,10 +2144,10 @@ $('saveBtn').addEventListener('click',async()=>{
   $('saveBtn').disabled=true;
   try{
     const blob=await new Promise(r=>pendingResult.canvas.toBlob(r,'image/png'));
-    const tw=320,th=Math.round(320*pendingResult.h/pendingResult.w);
+    const tw=THUMB_W,th=Math.max(1,Math.round(THUMB_W*pendingResult.h/pendingResult.w));
     const tc=document.createElement('canvas');tc.width=tw;tc.height=th;
     tc.getContext('2d').drawImage(pendingResult.canvas,0,0,tw,th);
-    const thumb=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.8));
+    const thumb=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.85));
     const mpp=parseFloat($('saveMpp').value)||null;
     const camKey=saveCam||null;
     const natMpp=nativeMppFor(saveObjective,camKey);
@@ -2232,16 +2237,68 @@ function renderLibrary(){
   }
 }
 $('searchInput').addEventListener('input',renderLibrary);
+/* Slides saved before v17 carry a 320 px thumbnail. Redraw them from the image
+   that is already stored, one at a time, only while nothing else is running. */
+let thumbUpgradeDone=false;
+async function upgradeThumbs(){
+  if(thumbUpgradeDone||restitching||capturing)return;
+  const todo=allSlides.filter(s=>s.image&&s.thumb&&s.thumb.size<40000);
+  if(!todo.length){thumbUpgradeDone=true;return;}
+  for(const s of todo){
+    if(restitching||capturing||currentView!=='library')return;   // try again later
+    try{
+      const bmp=await createImageBitmap(s.image);
+      const tw=THUMB_W,th=Math.max(1,Math.round(THUMB_W*bmp.height/bmp.width));
+      const tc=document.createElement('canvas');tc.width=tw;tc.height=th;
+      tc.getContext('2d').drawImage(bmp,0,0,tw,th);
+      if(bmp.close)bmp.close();
+      const blob=await new Promise(r=>tc.toBlob(r,'image/jpeg',0.85));
+      if(!blob)continue;
+      const rec=await dbGet(s.id);
+      if(!rec)continue;
+      rec.thumb=blob;await dbPut(rec);s.thumb=blob;
+    }catch(e){/* a slide we cannot decode is not worth stopping for */}
+    await new Promise(r=>setTimeout(r,60));
+  }
+  thumbUpgradeDone=true;
+  renderLibrary();
+}
+
+/* est.usage on iOS reported 418 KB for a library holding more than a gigabyte
+   of video, which is worse than no number at all — he could fill the phone with
+   no warning. Add up what the records actually hold instead. */
+function librarySize(){
+  let n=0;
+  for(const s of allSlides)
+    n+=(s.bytes||0)+(s.videoBytes||(s.video&&s.video.size)||0)+((s.thumb&&s.thumb.size)||0);
+  return n;
+}
 async function updateStorageNote(){
   const n=allSlides.length;
-  let note=n+' slide'+(n===1?'':'s');
+  const used=librarySize();
+  let note=n+' slide'+(n===1?'':'s')+' · '+fmtSize(used);
+  let tight=false;
   try{
     if(navigator.storage&&navigator.storage.estimate){
       const est=await navigator.storage.estimate();
-      if(est.usage)note+=' · '+fmtSize(est.usage);
+      // The browser's own usage figure has been wrong by orders of magnitude on
+      // iOS, so it is only used for the QUOTA — how much room is left.
+      // Only say anything when the quota is both believable and actually close:
+      // a wrong "0 KB free" is worse than saying nothing.
+      if(est.quota&&est.quota>used){
+        const left=est.quota-Math.max(used,est.usage||0);
+        if(left>0&&left<3e9){note+=' · '+fmtSize(left)+' free';tight=left<1.2e9;}
+      }
     }
   }catch(e){}
-  $('storageNote').textContent=note;
+  const el=$('storageNote');
+  el.textContent=note;
+  el.style.color=tight?'var(--warn)':'';
+  if(tight&&!updateStorageNote._warned){
+    updateStorageNote._warned=true;
+    toast('Storage is filling up. Export the older scans to the Mac and delete them here — '
+         +'the source video is most of the size.');
+  }
 }
 
 /* ---------------- Detail viewer ---------------- */
@@ -2298,6 +2355,7 @@ function renderMeta(){
     ['Capture time',s.durationSec+' s'],
     ['Source',s.deviceLabel||'—'],
     ['File size',fmtSize(s.bytes||0)],
+    ['Total on phone',fmtSize((s.bytes||0)+(s.videoBytes||(s.video&&s.video.size)||0))],
     ['Source video',s.video?('in library · '+fmtSize(s.videoBytes||s.video.size||0)):
                     s.archiveFolder?('archived · '+s.archiveFolder):'not kept'],
     ['Preview scale',s.compZoom==null?'—':(s.compZoom>=0.999?'full':
@@ -3153,7 +3211,7 @@ function showView(name){
   $('library').classList.toggle('active',name==='library');
   $('tabCapture').classList.toggle('on',name==='capture');
   $('tabLibrary').classList.toggle('on',name==='library');
-  if(name==='library'){refreshLibrary();kickRestitch();}
+  if(name==='library'){refreshLibrary();kickRestitch();setTimeout(upgradeThumbs,600);}
 }
 $('tabCapture').addEventListener('click',()=>showView('capture'));
 $('tabLibrary').addEventListener('click',()=>showView('library'));
@@ -3164,6 +3222,7 @@ $('archiveBtn').addEventListener('click',chooseArchiveFolder);
 syncSettingsUI();
 refreshLibrary();
 if(restitch.queue.length)setTimeout(kickRestitch,1500);
+setTimeout(()=>{if(currentView==='library')upgradeThumbs();},2500);
 loadArchiveHandle();
 if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){
   $('enableCamBtn').disabled=true;
