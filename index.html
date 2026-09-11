@@ -139,6 +139,10 @@
   #restitchPill{display:none;align-items:center;gap:10px;margin-top:10px;padding:9px 12px;
     border:1px solid var(--line);border-radius:10px;background:var(--raised)}
   #restitchPill.on{display:flex}
+  #restitchOffer{display:none;align-items:center;gap:10px;margin-top:10px;padding:9px 12px;
+    border:1px solid var(--accent-deep);border-radius:10px;background:var(--raised)}
+  #restitchOffer.on{display:flex}
+  #restitchOffer .t{flex:1;min-width:0;font-size:12px;color:var(--text)}
   #restitchPill .t{flex:1;min-width:0;font-size:12px;color:var(--muted);
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #restitchPill .b{width:96px;height:6px;border-radius:99px;background:#241f2d;overflow:hidden}
@@ -172,16 +176,17 @@
   #scalebar{position:absolute;left:14px;bottom:14px;background:rgba(20,18,24,.8);border:1px solid var(--line);
     border-radius:8px;padding:6px 10px;font-family:var(--mono);font-size:11px;color:var(--text);display:none}
   #scalebar .bar{height:3px;background:var(--text);margin-top:4px;border-radius:2px}
-  #zoomHint{position:absolute;right:14px;bottom:14px;font-family:var(--mono);font-size:11px;
+  #zoomHint{position:absolute;right:14px;top:12px;font-family:var(--mono);font-size:11px;
+    transition:opacity .4s;
     color:var(--faint);background:rgba(20,18,24,.8);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
   #detailMeta{border-top:1px solid var(--line-soft);background:var(--surface);padding:12px 16px 14px;
     max-height:34vh;overflow-y:auto}
-  #detailActions{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line-soft);
-    background:var(--surface);padding:9px 12px calc(9px + var(--safe-b))}
-  #detailActions .grow{flex:1}
-  .abtn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
-    min-width:62px;min-height:54px;padding:6px 10px;border-radius:11px;border:1px solid var(--line);
-    background:var(--raised);color:var(--text);font-size:11px;font-weight:600;letter-spacing:.03em}
+  #detailActions{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line-soft);
+    background:var(--surface);padding:9px 10px calc(9px + var(--safe-b));overflow-x:auto}
+  #detailActions .grow{flex:1 1 auto;min-width:0}
+  .abtn{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+    min-width:52px;min-height:54px;padding:6px 7px;border-radius:11px;border:1px solid var(--line);
+    background:var(--raised);color:var(--text);font-size:10px;font-weight:600;letter-spacing:.02em}
   .abtn svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
   .abtn.danger{color:var(--crit);border-color:rgba(224,86,107,.5)}
   .abtn:active{background:var(--surface)}
@@ -259,6 +264,8 @@
     </div>
     <div id="restitchPill"><span class="t" id="restitchText"></span>
     <span class="b"><i id="restitchBar"></i></span></div>
+  <div id="restitchOffer"><span class="t" id="restitchOfferText"></span>
+    <button class="btn ghost" id="restitchAll" style="padding:7px 12px;font-size:13px">Re-stitch all</button></div>
   <div id="libScroll">
       <div id="grid"></div>
       <div id="emptyLib">
@@ -506,7 +513,7 @@
   <div id="viewerWrap">
     <canvas id="viewerCanvas"></canvas>
     <div id="scalebar"><span id="scalebarLabel"></span><div class="bar" id="scalebarBar"></div></div>
-    <div id="zoomHint">drag · pinch / scroll to zoom · double-tap</div>
+    <div id="zoomHint">drag · pinch to zoom · double-tap</div>
   </div>
   <div id="detailMeta">
     <div class="mgrid" id="metaGrid"></div>
@@ -518,6 +525,9 @@
   <div id="detailActions">
     <button class="abtn" id="detailBackBottom" aria-label="Back to library">
       <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg><span>Back</span>
+    </button>
+    <button class="abtn" id="detailRotate" aria-label="Rotate 90 degrees">
+      <svg viewBox="0 0 24 24"><path d="M4 9a8 8 0 1 1 1.6 6M4 4v5h5"/></svg><span>Rotate</span>
     </button>
     <button class="abtn" id="detailEdit" aria-label="Edit slide details">
       <svg viewBox="0 0 24 24"><path d="M4 20l4-1L20 7l-3-3L5 16l-1 4Z"/></svg><span>Edit</span>
@@ -638,7 +648,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v17';
+const APP_VERSION='v18';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -1910,12 +1920,33 @@ function showRestitchProgress(pct,note){
   const pill=$('restitchPill');
   if(!restitching){pill.classList.remove('on');return;}
   pill.classList.add('on');
-  $('restitchText').textContent=note||('Re-stitching '+restitch.name+' at full quality…');
+  const queuedLeft=Math.max(0,restitch.queue.length-1);
+  $('restitchText').textContent=(note||('Re-stitching '+restitch.name+' at full quality…'))
+      +(queuedLeft?'  ·  '+queuedLeft+' more queued':'');
   $('restitchBar').style.width=Math.max(0,Math.min(100,pct))+'%';
   const bar=document.querySelector('.card[data-id="'+restitch.id+'"] .rs i');
   if(bar)bar.style.width=Math.max(0,Math.min(100,pct))+'%';
 }
-function hideRestitchProgress(){restitching=false;$('restitchPill').classList.remove('on');}
+function hideRestitchProgress(){restitching=false;$('restitchPill').classList.remove('on');refreshRestitchOffer();}
+/* Nothing visible was telling him whether anything was happening, so a library
+   full of pre-v16 scans just looked broken. Say plainly how many are still on
+   the live mosaic, and offer to queue the lot. */
+function refreshRestitchOffer(){
+  const el=$('restitchOffer');
+  if(!el)return;
+  const todo=allSlides.filter(s=>s.video&&!s.restitched&&!restitch.queue.includes(s.id));
+  if(restitching||!todo.length||!settings.autoRestitch){el.classList.remove('on');return;}
+  el.classList.add('on');
+  $('restitchOfferText').textContent=todo.length===1
+    ? '1 scan is still showing its live preview. Re-stitching rebuilds it from the video at full quality.'
+    : todo.length+' scans are still showing their live preview — they were taken before re-stitching existed.';
+}
+$('restitchAll').addEventListener('click',()=>{
+  const todo=allSlides.filter(s=>s.video&&!s.restitched&&!restitch.queue.includes(s.id));
+  for(const s of todo)queueRestitch(s.id);
+  refreshRestitchOffer();renderLibrary();
+  toast('Queued '+todo.length+' scan'+(todo.length===1?'':'s')+'. Stay on this tab and they will work through, a few minutes each.');
+});
 
 async function runRestitch(){
   if(!restitchIdle())return;
@@ -2213,6 +2244,7 @@ async function refreshLibrary(){
   updateStorageNote();
 }
 function renderLibrary(){
+  refreshRestitchOffer();
   const q=$('searchInput').value.trim().toLowerCase();
   const list=q?allSlides.filter(s=>
     (s.name+' '+(s.notes||'')+' '+(s.stain||'')+' '+(s.mag||'')).toLowerCase().includes(q)):allSlides;
@@ -2306,6 +2338,37 @@ async function updateStorageNote(){
 /* ---------------- Detail viewer ---------------- */
 let detailSlide=null, detailBitmap=null;
 const vState={x:0,y:0,scale:1};
+let vRot=0;                 // 0/90/180/270, stored per slide
+let hintTimer=null;
+let viewProxy=null;         // downscaled copy, drawn while a gesture is in flight
+let interacting=false, settleTimer=null, drawPending=false;
+/* Panning a 7000 px mosaic redrew the whole bitmap on every pointermove, which
+   is what made zooming feel like it was snapping rather than gliding. Draw a
+   small proxy while the fingers are down and the full image once they settle. */
+function makeProxy(bmp){
+  const MAXP=1600;
+  const k=Math.min(1,MAXP/Math.max(bmp.width||1,bmp.height||1));
+  if(k>=1)return null;
+  const c=document.createElement('canvas');
+  c.width=Math.max(1,Math.round(bmp.width*k));c.height=Math.max(1,Math.round(bmp.height*k));
+  c.getContext('2d').drawImage(bmp,0,0,c.width,c.height);
+  return c;
+}
+function requestDraw(){
+  if(drawPending)return;
+  drawPending=true;
+  requestAnimationFrame(()=>{drawPending=false;drawViewer();});
+}
+function beginInteract(){
+  interacting=true;
+  if(settleTimer)clearTimeout(settleTimer);
+}
+function endInteract(){
+  if(settleTimer)clearTimeout(settleTimer);
+  settleTimer=setTimeout(()=>{interacting=false;drawViewer();},160);
+}
+function rotW(){return (vRot%180)?detailSlide.heightPx:detailSlide.widthPx;}
+function rotH(){return (vRot%180)?detailSlide.widthPx:detailSlide.heightPx;}
 const vc=$('viewerCanvas'),vwrap=$('viewerWrap');
 
 let detailHist=false;
@@ -2332,6 +2395,12 @@ async function openDetail(id){
            +'try Edit \u2192 Re-stitch from the video.');
     }
   }
+  vRot=detailSlide.rotation||0;
+  const zh=$('zoomHint');zh.style.opacity='1';zh.style.display='';
+  if(hintTimer)clearTimeout(hintTimer);
+  hintTimer=setTimeout(()=>{zh.style.opacity='0';},4500);
+  viewProxy=detailBitmap?makeProxy(detailBitmap):null;
+  interacting=false;
   fitViewer();
   drawViewer();
 }
@@ -2339,11 +2408,52 @@ function closeDetail(){
   const popNeeded=detailHist;detailHist=false;
   $('detail').classList.remove('open');
   if(detailBitmap&&detailBitmap.close)detailBitmap.close();
-  detailBitmap=null;detailSlide=null;
+  detailBitmap=null;detailSlide=null;viewProxy=null;vRot=0;
+  if(settleTimer){clearTimeout(settleTimer);settleTimer=null;}
+  interacting=false;
   if(popNeeded){try{history.back();}catch(e){}}
 }
 $('detailBack').addEventListener('click',closeDetail);
 $('detailBackBottom').addEventListener('click',closeDetail);
+/* Rotation is stored on the slide, so it survives closing the viewer, and the
+   card thumbnail and the downloaded PNG follow it. The stored mosaic itself is
+   left as it was recorded — re-encoding a 7000 px PNG on every tap would be
+   slow, and the enhancer works from the video regardless. */
+let rotSaveTimer=null;
+$('detailRotate').addEventListener('click',()=>{
+  if(!detailSlide||!detailBitmap)return;
+  vRot=(vRot+90)%360;
+  fitViewer();drawViewer();
+  if(rotSaveTimer)clearTimeout(rotSaveTimer);
+  const id=detailSlide.id,rot=vRot;
+  rotSaveTimer=setTimeout(async()=>{
+    try{
+      const rec=await dbGet(id);
+      if(!rec)return;
+      rec.rotation=rot;
+      const t=rotatedThumb(detailBitmap,rot,rec.widthPx,rec.heightPx);
+      if(t){const blob=await new Promise(r=>t.toBlob(r,'image/jpeg',0.85));if(blob)rec.thumb=blob;}
+      await dbPut(rec);
+      const i=allSlides.findIndex(x=>x.id===id);
+      if(i>=0){allSlides[i].rotation=rot;if(rec.thumb)allSlides[i].thumb=rec.thumb;}
+    }catch(e){console.error('rotation not saved',e);}
+  },700);
+});
+function rotatedThumb(bmp,rot,w,h){
+  try{
+    const ow=(rot%180)?h:w, oh=(rot%180)?w:h;
+    const tw=THUMB_W, th=Math.max(1,Math.round(THUMB_W*oh/ow));
+    const c=document.createElement('canvas');c.width=tw;c.height=th;
+    const g=c.getContext('2d');
+    const k=tw/ow;
+    g.scale(k,k);
+    if(rot===90){g.translate(ow,0);g.rotate(Math.PI/2);}
+    else if(rot===180){g.translate(ow,oh);g.rotate(Math.PI);}
+    else if(rot===270){g.translate(0,oh);g.rotate(-Math.PI/2);}
+    g.drawImage(bmp,0,0,w,h);
+    return c;
+  }catch(e){return null;}
+}
 /* Swipe-back (or any pop) closes the slide rather than the app. Clearing the
    flag first stops closeDetail popping a second time. */
 window.addEventListener('popstate',()=>{
@@ -2360,8 +2470,8 @@ function renderMeta(){
     ['Magnification',s.mag||'—'],
     ['Native µm / px',s.mppNative!=null?Number(s.mppNative).toFixed(4):'—'],
     ['Stain',s.stain||'—'],
-    ['Frames',String(s.frames)],
-    ['Capture time',s.durationSec+' s'],
+    ['Frames',s.frames!=null?String(s.frames):'—'],
+    ['Capture time',s.durationSec!=null?s.durationSec+' s':'—'],
     ['Source',s.deviceLabel||'—'],
     ['File size',fmtSize(s.bytes||0)],
     ['Total on phone',fmtSize((s.bytes||0)+(s.videoBytes||(s.video&&s.video.size)||0))],
@@ -2388,21 +2498,29 @@ function fitViewer(){
   vc.width=r.width*devicePixelRatio;vc.height=r.height*devicePixelRatio;
   vc.style.width=r.width+'px';vc.style.height=r.height+'px';
   if(!detailSlide)return;
-  const sc=Math.min(r.width/detailSlide.widthPx,r.height/detailSlide.heightPx)*0.96;
+  const w=rotW(),h=rotH();
+  const sc=Math.min(r.width/w,r.height/h)*0.96;
   vState.scale=sc;
-  vState.x=(r.width-detailSlide.widthPx*sc)/2;
-  vState.y=(r.height-detailSlide.heightPx*sc)/2;
+  vState.x=(r.width-w*sc)/2;
+  vState.y=(r.height-h*sc)/2;
 }
 function drawViewer(){
-  if(!detailBitmap)return;
+  if(!detailBitmap||!detailSlide)return;
   const ctx=vc.getContext('2d');
   ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
   ctx.fillStyle='#0d0c10';
   ctx.fillRect(0,0,vc.width,vc.height);
-  ctx.imageSmoothingEnabled=vState.scale<2;
+  const src=(interacting&&viewProxy)?viewProxy:detailBitmap;
+  // Smooth while the image is shown smaller than 1:1; show real pixels past it,
+  // which is what you want when judging nuclear detail.
+  ctx.imageSmoothingEnabled=vState.scale<1||src===viewProxy;
+  ctx.imageSmoothingQuality='high';
   ctx.translate(vState.x,vState.y);
   ctx.scale(vState.scale,vState.scale);
-  ctx.drawImage(detailBitmap,0,0);
+  if(vRot===90){ctx.translate(rotW(),0);ctx.rotate(Math.PI/2);}
+  else if(vRot===180){ctx.translate(rotW(),rotH());ctx.rotate(Math.PI);}
+  else if(vRot===270){ctx.translate(0,rotH());ctx.rotate(-Math.PI/2);}
+  ctx.drawImage(src,0,0,detailSlide.widthPx,detailSlide.heightPx);
   drawScalebar();
 }
 function drawScalebar(){
@@ -2421,10 +2539,15 @@ function drawScalebar(){
 // pan/zoom (pointer events; pinch via two pointers)
 const pointers=new Map();
 let lastPinchDist=0;
+let gestureWasPinch=false, downAt=0, downPt=null;
 vwrap.addEventListener('pointerdown',e=>{
   vwrap.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  beginInteract();
+  if(hintTimer){clearTimeout(hintTimer);hintTimer=null;$('zoomHint').style.opacity='0';}
+  if(pointers.size===1){downAt=Date.now();downPt={x:e.clientX,y:e.clientY};}
   if(pointers.size===2){
+    gestureWasPinch=true;
     const p=[...pointers.values()];
     lastPinchDist=Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y);
   }
@@ -2434,7 +2557,7 @@ vwrap.addEventListener('pointermove',e=>{
   const prev=pointers.get(e.pointerId);
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
   if(pointers.size===1){
-    vState.x+=e.clientX-prev.x;vState.y+=e.clientY-prev.y;drawViewer();
+    vState.x+=e.clientX-prev.x;vState.y+=e.clientY-prev.y;requestDraw();
   } else if(pointers.size===2){
     const p=[...pointers.values()];
     const d=Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y);
@@ -2445,19 +2568,47 @@ vwrap.addEventListener('pointermove',e=>{
     lastPinchDist=d;
   }
 });
-function endPointer(e){pointers.delete(e.pointerId);lastPinchDist=0;}
+function endPointer(e){
+  pointers.delete(e.pointerId);lastPinchDist=0;
+  if(pointers.size===0){
+    endInteract();
+    // A pinch ends with two pointerups a few ms apart. The old double-tap test
+    // read that as a double tap and slammed the zoom to 2x — the "snap zoom".
+    setTimeout(()=>{gestureWasPinch=false;},400);
+  }
+}
 vwrap.addEventListener('pointerup',endPointer);
 vwrap.addEventListener('pointercancel',endPointer);
 vwrap.addEventListener('wheel',e=>{
   e.preventDefault();
+  beginInteract();
   zoomAt(e.clientX,e.clientY,Math.exp(-e.deltaY*0.0015));
+  endInteract();
 },{passive:false});
 let lastTap=0;
 vwrap.addEventListener('pointerup',e=>{
   const now=Date.now();
-  if(now-lastTap<300){zoomAt(e.clientX,e.clientY,2);}
-  lastTap=now;
+  // Only a genuine single-finger tap counts: not the tail of a pinch, and not
+  // the end of a drag.
+  const moved=downPt?Math.hypot(e.clientX-downPt.x,e.clientY-downPt.y):99;
+  const tap=!gestureWasPinch&&pointers.size===0&&moved<12&&(now-downAt)<400;
+  if(tap&&now-lastTap<300){animateZoom(e.clientX,e.clientY,2);lastTap=0;}
+  else if(tap)lastTap=now;
 });
+/* A double tap that jumps instantly is disorienting on a big mosaic; ease it. */
+function animateZoom(cx,cy,factor,ms){
+  ms=ms||200;
+  const from=vState.scale,to=Math.max(0.02,Math.min(40,from*factor));
+  const t0=performance.now();
+  beginInteract();
+  const step=()=>{
+    const k=Math.min(1,(performance.now()-t0)/ms);
+    const e2=1-Math.pow(1-k,3);                     // ease out
+    zoomAt(cx,cy,(from+(to-from)*e2)/vState.scale);
+    if(k<1)requestAnimationFrame(step); else endInteract();
+  };
+  requestAnimationFrame(step);
+}
 function zoomAt(cx,cy,factor){
   const r=vwrap.getBoundingClientRect();
   const px=cx-r.left,py=cy-r.top;
@@ -2466,14 +2617,30 @@ function zoomAt(cx,cy,factor){
   vState.x=px-(px-vState.x)*k;
   vState.y=py-(py-vState.y)*k;
   vState.scale=ns;
-  drawViewer();
+  requestDraw();
 }
 window.addEventListener('resize',()=>{if($('detail').classList.contains('open')){fitViewer();drawViewer();}});
 
 $('detailDownload').addEventListener('click',async()=>{
   if(!detailSlide)return;
   const fname=(detailSlide.name.replace(/[^\w\- ]+/g,'').trim().replace(/ +/g,'_')||'slide')+'.png';
-  await deliverFile(detailSlide.image,fname,'PNG');
+  let blob=detailSlide.image;
+  const rot=detailSlide.rotation||vRot||0;
+  if(rot&&detailBitmap){
+    try{
+      const w=detailSlide.widthPx,h=detailSlide.heightPx;
+      const ow=(rot%180)?h:w, oh=(rot%180)?w:h;
+      const c=document.createElement('canvas');c.width=ow;c.height=oh;
+      const g=c.getContext('2d');
+      if(rot===90){g.translate(ow,0);g.rotate(Math.PI/2);}
+      else if(rot===180){g.translate(ow,oh);g.rotate(Math.PI);}
+      else if(rot===270){g.translate(0,oh);g.rotate(-Math.PI/2);}
+      g.drawImage(detailBitmap,0,0);
+      const b2=await new Promise(r=>c.toBlob(r,'image/png'));
+      if(b2)blob=b2;
+    }catch(e){toast('Could not rotate the download — saving it unrotated.');}
+  }
+  await deliverFile(blob,fname,'PNG');
 });
 /* ---------------- Export bundle (iPhone → Mac) ----------------
    One zip per slide, laid out exactly like an archive folder:
