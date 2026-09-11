@@ -499,6 +499,9 @@
        top of a large phone is both out of thumb reach and where iOS puts the
        clock and the charging indicator. -->
   <div id="detailActions">
+    <button class="abtn" id="detailBackBottom" aria-label="Back to library">
+      <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg><span>Back</span>
+    </button>
     <button class="abtn" id="detailEdit" aria-label="Edit slide details">
       <svg viewBox="0 0 24 24"><path d="M4 20l4-1L20 7l-3-3L5 16l-1 4Z"/></svg><span>Edit</span>
     </button>
@@ -618,7 +621,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v14';
+const APP_VERSION='v15';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -2006,6 +2009,7 @@ function closeDetail(){
   if(popNeeded){try{history.back();}catch(e){}}
 }
 $('detailBack').addEventListener('click',closeDetail);
+$('detailBackBottom').addEventListener('click',closeDetail);
 /* Swipe-back (or any pop) closes the slide rather than the app. Clearing the
    flag first stops closeDetail popping a second time. */
 window.addEventListener('popstate',()=>{
