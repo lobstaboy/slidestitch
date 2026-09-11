@@ -269,8 +269,10 @@
   <div id="libScroll">
       <div id="grid"></div>
       <div id="emptyLib">
-        <div class="scopeicon">🧫</div>
-        <p>No slides yet.<br>Capture your first whole-slide image from the Capture tab.</p>
+        <div class="scopeicon" id="emptyIcon">🧫</div>
+        <p id="emptyText">No slides yet.<br>Capture your first whole-slide image from the Capture tab.</p>
+        <p class="sub" id="emptyDiag" style="margin-top:14px;font-family:var(--mono);font-size:11px;
+           white-space:pre-wrap;text-align:left"></p>
       </div>
     </div>
   </section>
@@ -648,7 +650,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v19';
+const APP_VERSION='v20';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -2311,10 +2313,48 @@ $('saveBtn').addEventListener('click',async()=>{
 
 /* ---------------- Library ---------------- */
 let allSlides=[];
+let libraryError=null;
 async function refreshLibrary(){
-  try{allSlides=await dbAll();}catch(e){allSlides=[];}
+  try{allSlides=await dbAll();libraryError=null;}
+  catch(e){allSlides=[];libraryError=(e&&(e.name+': '+e.message))||String(e)||'unknown error';}
   renderLibrary();
   updateStorageNote();
+  if(libraryError)showLibraryDiag();
+}
+/* Read-only. Reports what the database actually contains, so "no slides yet"
+   can be told apart from "could not open the database". Touches nothing. */
+async function libraryDiag(){
+  const out={error:libraryError,count:null,dbOpen:false,usage:null,quota:null,persisted:null};
+  try{
+    const db=await openDB();
+    out.dbOpen=true;
+    out.count=await new Promise((res,rej)=>{
+      const r=db.transaction('slides').objectStore('slides').count();
+      r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);
+    });
+  }catch(e){out.error=out.error||((e&&e.name+': '+e.message)||String(e));}
+  try{
+    if(navigator.storage&&navigator.storage.estimate){
+      const est=await navigator.storage.estimate();
+      out.usage=est.usage;out.quota=est.quota;
+    }
+    if(navigator.storage&&navigator.storage.persisted)out.persisted=await navigator.storage.persisted();
+  }catch(e){}
+  return out;
+}
+async function showLibraryDiag(){
+  const d=await libraryDiag();
+  const el=$('emptyDiag');if(!el)return;
+  const lines=[
+    'records in the database: '+(d.count==null?'could not be counted':d.count),
+    'database opened: '+(d.dbOpen?'yes':'NO'),
+    'storage in use: '+(d.usage!=null?fmtSize(d.usage):'unknown')
+      +(d.quota!=null?'  of  '+fmtSize(d.quota):''),
+    'storage marked persistent: '+(d.persisted==null?'unknown':(d.persisted?'yes':'no')),
+    'build: SlideStitch '+APP_VERSION,
+  ];
+  if(d.error)lines.unshift('READ ERROR: '+d.error);
+  el.textContent=lines.join('\n');
 }
 function renderLibrary(){
   refreshRestitchOffer();
@@ -2323,6 +2363,16 @@ function renderLibrary(){
     (s.name+' '+(s.notes||'')+' '+(s.stain||'')+' '+(s.mag||'')).toLowerCase().includes(q)):allSlides;
   const grid=$('grid');grid.innerHTML='';
   $('emptyLib').style.display=list.length?'none':'block';
+  if(!list.length){
+    const broken=!!libraryError;
+    $('emptyIcon').textContent=broken?'\u26a0\ufe0f':'\ud83e\uddeb';
+    $('emptyText').innerHTML=broken
+      ? '<b>The slide library could not be read.</b><br>This is not the same as it being empty — '
+        +'do not delete anything or reinstall. The details below say what happened.'
+      : (q?'Nothing matches that search.'
+          :'No slides yet.<br>Capture your first whole-slide image from the Capture tab.');
+    if(!q)showLibraryDiag();
+  }
   for(const s of list){
     const card=document.createElement('button');
     card.className='card';
@@ -3490,6 +3540,17 @@ $('enableCamBtn').addEventListener('click',()=>startCamera(settings.cameraId));
 
 /* ---------------- boot ---------------- */
 $('archiveBtn').addEventListener('click',chooseArchiveFolder);
+/* iOS can evict a site's entire storage under pressure, and this app holds
+   hundreds of megabytes of video per scan. Asking for persistence is
+   best-effort and free; without it, a full phone can take the library with it. */
+(async()=>{
+  try{
+    if(navigator.storage&&navigator.storage.persist){
+      const already=navigator.storage.persisted?await navigator.storage.persisted():false;
+      if(!already)await navigator.storage.persist();
+    }
+  }catch(e){}
+})();
 syncSettingsUI();
 refreshLibrary();
 if(restitch.queue.length)setTimeout(kickRestitch,1500);
