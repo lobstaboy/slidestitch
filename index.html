@@ -650,7 +650,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v20';
+const APP_VERSION='v21';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -1346,10 +1346,12 @@ function ensureCompCapacity(px,py,capz){
   return true;
 }
 function regrow(nw,nh,dx,dy){
+  const old=compCanvas;
   const nc=document.createElement('canvas');nc.width=nw;nc.height=nh;
   const nctx=nc.getContext('2d');
-  nctx.drawImage(compCanvas,dx,dy);
+  nctx.drawImage(old,dx,dy);
   compCanvas=nc;compCtx=nctx;
+  freeCanvas(old);
   comp.ox+=dx;comp.oy+=dy;
   comp.minX+=dx;comp.maxX+=dx;comp.minY+=dy;comp.maxY+=dy;
   comp.lastPasteX+=dx;comp.lastPasteY+=dy;
@@ -1365,7 +1367,9 @@ function rescaleComposite(f,tx,ty){
   const nctx=nc.getContext('2d');
   nctx.imageSmoothingQuality='high';
   nctx.drawImage(compCanvas,tx,ty,compCanvas.width*f,compCanvas.height*f);
+  const old=compCanvas;
   compCanvas=nc;compCtx=nctx;
+  freeCanvas(old);
   const TX=v=>v*f+tx,TY=v=>v*f+ty;
   comp.ox=TX(comp.ox);comp.oy=TY(comp.oy);
   comp.minX=TX(comp.minX);comp.maxX=TX(comp.maxX);
@@ -1897,6 +1901,34 @@ const restitch={queue:store.get('restitchQueue',[]),id:null,name:'',pct:0,abort:
 const THUMB_W=800;            // library card thumbnails, in real pixels
 const RESTITCH_FPS=6;         // frames sampled per second of video
 const RESTITCH_CAP=1536;      // paste tile size for the re-stitch
+/* Measured on one clip, varying only the ceiling (effective resolution is
+   tile x compZoom — higher is finer microns per pixel):
+     ceiling 4096  tile 1024 -> 705    composite peaks at  32 MB
+     ceiling 4096  tile 1536 -> 705    composite peaks at  64 MB
+     ceiling 5120  tile 1536 -> 882    composite peaks at  80 MB
+     ceiling 6144  tile 1536 -> 1058   composite peaks at  96 MB
+     ceiling 8192  tile 1536 -> 1411   composite peaks at 128 MB
+   Two things follow. The whole gain comes from the CEILING, not the tile — at
+   4096 the bigger tile buys exactly nothing and costs double the memory. And
+   the cost scales with the gain, with a regrow briefly needing two canvases,
+   on top of 4K video decode and the PNG encode at the end. Giving iOS the full
+   8192 killed the app outright: white flash, back to the Home Screen.
+   So step DOWN the ladder each time a pass fails to finish. */
+const RESTITCH_LADDER=[6144,5120,4096];
+function restitchPlan(fails,tight,ceiling){
+  if(tight===undefined)tight=IS_IOS;
+  if(ceiling===undefined)ceiling=CANVAS_CEILING;
+  if(!tight)return {max:ceiling,cap:RESTITCH_CAP};
+  const max=Math.min(ceiling,RESTITCH_LADDER[Math.min(fails,RESTITCH_LADDER.length-1)]);
+  return {max,cap:max>=6144?RESTITCH_CAP:1024};   // below 6144 the big tile is pure cost
+}
+function restitchFails(id){const m=store.get('restitchFails',{});return m[id]||0;}
+function noteRestitchFail(id){
+  const m=store.get('restitchFails',{});m[id]=(m[id]||0)+1;store.set('restitchFails',m);
+}
+function clearRestitchFails(id){
+  const m=store.get('restitchFails',{});if(m[id]){delete m[id];store.set('restitchFails',m);}
+}
 let restitchSeeking=false;
 
 function saveRestitchQueue(){store.set('restitchQueue',restitch.queue.slice(0,40));}
@@ -1963,9 +1995,22 @@ async function runRestitch(){
   showRestitchProgress(0,'Re-stitching '+restitch.name+' — reading the video…');
   // The video element is shared with the live preview, so the camera must let go.
   if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
+  const fails=restitchFails(id);
+  if(fails>=RESTITCH_LADDER.length){
+    rec.restitched={at:Date.now(),skipped:true,reason:'not enough memory on this device',app:APP_VERSION};
+    try{await dbPut(rec);}catch(e){}
+    restitch.queue=restitch.queue.filter(x=>x!==id);saveRestitchQueue();
+    clearRestitchFails(id);
+    toast('Re-stitching '+restitch.name+' ran the phone out of memory every time — keeping the original.');
+    cleanupRestitch();refreshLibrary();return kickRestitch();
+  }
+  const plan=restitchPlan(fails);
   restitchSaved={quality:settings.quality,maxCanvas:settings.maxCanvas};
-  settings.quality=Math.max(Number(settings.quality)||1024,RESTITCH_CAP);
-  settings.maxCanvas=CANVAS_CEILING;
+  settings.quality=Math.max(Number(settings.quality)||1024,plan.cap);
+  settings.maxCanvas=plan.max;
+  // If the app is killed mid-pass this marker survives; the next launch reads
+  // it, counts a failure, and the ladder steps down instead of crash-looping.
+  store.set('restitchInFlight',{id:id,at:Date.now(),max:plan.max});
   usingFileSource=true;
   video.srcObject=null;
   restitchUrl=URL.createObjectURL(rec.video);
@@ -2160,6 +2205,7 @@ async function finishRestitch(){
       }
       restitch.queue=restitch.queue.filter(x=>x!==restitch.id);
       saveRestitchQueue();
+      clearRestitchFails(restitch.id);
     }catch(e){
       console.error('restitch save failed',e);
       toast('Re-stitch could not be saved — the scan is untouched.');
@@ -2174,6 +2220,10 @@ async function finishRestitch(){
 
 function cleanupRestitch(){
   capturing=false;
+  store.set('restitchInFlight',null);
+  freeCanvas(compCanvas);freeCanvas(frameCanvas);freeCanvas(maskCanvas);
+  compCanvas=null;compCtx=null;frameCanvas=null;frameCtx=null;maskCanvas=null;
+  tileMap.clear();
   if(restitchTimer){clearInterval(restitchTimer);restitchTimer=null;}
   if(restitchSaved){
     settings.quality=restitchSaved.quality;settings.maxCanvas=restitchSaved.maxCanvas;
@@ -2468,6 +2518,10 @@ let interacting=false, settleTimer=null, drawPending=false;
 /* Panning a 7000 px mosaic redrew the whole bitmap on every pointermove, which
    is what made zooming feel like it was snapping rather than gliding. Draw a
    small proxy while the fingers are down and the full image once they settle. */
+/* Setting a canvas to 0x0 releases its backing store immediately. Dropping the
+   reference alone leaves tens of megabytes alive until the collector gets to
+   it, which on a phone is the difference between finishing and being killed. */
+function freeCanvas(c){try{if(c){c.width=0;c.height=0;}}catch(e){}}
 function makeProxy(bmp){
   const MAXP=1600;
   const k=Math.min(1,MAXP/Math.max(bmp.width||1,bmp.height||1));
@@ -3553,6 +3607,17 @@ $('archiveBtn').addEventListener('click',chooseArchiveFolder);
 })();
 syncSettingsUI();
 refreshLibrary();
+(function(){
+  const f=store.get('restitchInFlight',null);
+  if(f&&f.id){
+    noteRestitchFail(f.id);
+    store.set('restitchInFlight',null);
+    const n=restitchFails(f.id);
+    setTimeout(()=>toast(n>=RESTITCH_LADDER.length
+      ? 'A re-stitch keeps running this phone out of memory. That scan will be left as it is.'
+      : 'The last re-stitch did not finish — the phone ran out of memory. Retrying it smaller.'),1400);
+  }
+})();
 if(restitch.queue.length)setTimeout(kickRestitch,1500);
 setTimeout(()=>{if(currentView==='library')upgradeThumbs();},2500);
 loadArchiveHandle();
