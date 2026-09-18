@@ -650,7 +650,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v21';
+const APP_VERSION='v22';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -815,7 +815,7 @@ const settings={
   hiRes:store.get('hiRes',true),                  // request the camera's highest resolution
   lockAF:store.get('lockAF',true),                // lock focus/exposure/WB while recording
   speedCue:store.get('speedCue',true),            // warn when the sweep outruns sharpness
-  autoRestitch:store.get('autoRestitch',true)     // re-stitch each scan from its video afterwards
+  autoRestitch:store.get('autoRestitch',false)    // off: the Mac does this far better, see the gallery
 };
 
 /* ---------------- Magnification & scale calibration ----------------
@@ -2914,12 +2914,23 @@ $('detailExport').addEventListener('click',async()=>{
   const btn=$('detailExport');btn.style.opacity='.5';
   try{
     const folder=slideFolderName(detailSlide);
+    const vid=detailSlide.video;
+    // A zip entry needs a CRC32 of its contents, and computing that over a
+    // gigabyte of video in JavaScript is a billion-iteration loop — iOS killed
+    // the app every time. So the video never goes in the zip. The small stuff
+    // is zipped; the video is handed to the share sheet exactly as stored.
     const entries=[{name:folder+'/slide.png',blob:detailSlide.image},
                    {name:folder+'/meta.json',blob:new Blob([slideMetaJSON(detailSlide)],{type:'application/json'})}];
-    if(detailSlide.video)entries.push({name:folder+'/source.'+(detailSlide.videoExt||'mp4'),blob:detailSlide.video});
-    toast(detailSlide.video?'Packing slide + source video…':'Packing slide…');
+    toast('Packing the slide…');
     const zip=await buildZip(entries,p=>{btn.title='Packing '+Math.round(p*100)+'%';});
-    await deliverFile(zip,folder+'.zip','Slide bundle');
+    const okZip=await deliverFile(zip,folder+'.zip','Slide bundle');
+    if(vid&&okZip!==false){
+      const ext=detailSlide.videoExt||'mp4';
+      toast('Now the video ('+fmtSize(vid.size)+') — send it to the same folder.');
+      await new Promise(r=>setTimeout(r,900));
+      // Named so the Mac can file it next to the slide it belongs to.
+      await deliverFile(vid,folder+'__source.'+ext,'Source video');
+    }
   }catch(e){toast('Export failed: '+(e.message||e));}
   btn.style.opacity='';btn.title='Export bundle';
   exporting=false;
@@ -3586,7 +3597,7 @@ function showView(name){
   $('library').classList.toggle('active',name==='library');
   $('tabCapture').classList.toggle('on',name==='capture');
   $('tabLibrary').classList.toggle('on',name==='library');
-  if(name==='library'){refreshLibrary();kickRestitch();setTimeout(upgradeThumbs,600);}
+  if(name==='library'){refreshLibrary();kickRestitch();setTimeout(upgradeThumbs,1500);}
 }
 $('tabCapture').addEventListener('click',()=>showView('capture'));
 $('tabLibrary').addEventListener('click',()=>showView('library'));
@@ -3608,18 +3619,17 @@ $('archiveBtn').addEventListener('click',chooseArchiveFolder);
 syncSettingsUI();
 refreshLibrary();
 (function(){
+  // If the app died mid-pass, STOP. Do not retry on launch: that is how a
+  // crash becomes a loop. Clear the queue and let the user decide.
   const f=store.get('restitchInFlight',null);
   if(f&&f.id){
-    noteRestitchFail(f.id);
     store.set('restitchInFlight',null);
-    const n=restitchFails(f.id);
-    setTimeout(()=>toast(n>=RESTITCH_LADDER.length
-      ? 'A re-stitch keeps running this phone out of memory. That scan will be left as it is.'
-      : 'The last re-stitch did not finish — the phone ran out of memory. Retrying it smaller.'),1400);
+    restitch.queue=[];saveRestitchQueue();
+    settings.autoRestitch=false;store.set('autoRestitch',false);
+    setTimeout(()=>toast('The app was interrupted last time, so re-stitching is off. '
+      +'Your scans are all still here.'),1400);
   }
 })();
-if(restitch.queue.length)setTimeout(kickRestitch,1500);
-setTimeout(()=>{if(currentView==='library')upgradeThumbs();},2500);
 loadArchiveHandle();
 if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){
   $('enableCamBtn').disabled=true;
