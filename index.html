@@ -650,7 +650,7 @@ function makePhaseCorrelator(n){
 }
 
 /* ---------------- Stitcher ---------------- */
-const APP_VERSION='v22';
+const APP_VERSION='v23';
 const REG=256;
 const preprocess=makePreprocessor(REG);
 const correlate=makePhaseCorrelator(REG);
@@ -2435,7 +2435,10 @@ function renderLibrary(){
     card.querySelector('.name').textContent=s.name;
     card.querySelector('.meta').textContent=
       new Date(s.createdAt).toLocaleDateString()+' · '+s.widthPx+'×'+s.heightPx+(phys?' · '+phys:'')
-      +(s.restitched?' · full quality':(queued?' · re-stitch queued':''));
+      +(s.restitched
+          ? (s.restitched.skipped?' · re-stitch rejected, original kept':' · re-stitched')
+          : (queued?' · re-stitch queued':''))
+      +(s.video?'':' · video gone');
     const img=card.querySelector('img');
     img.src=URL.createObjectURL(s.thumb);
     img.onload=()=>URL.revokeObjectURL(img.src);
